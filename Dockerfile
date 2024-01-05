@@ -32,7 +32,8 @@ RUN /opt/panda/bin/pip install -U gnureadline
 RUN adduser atlpan
 RUN groupadd zp
 RUN usermod -a -G zp atlpan
-RUN /opt/panda/bin/pip install "git+https://github.com/PanDAWMS/panda-server.git#egg=panda-server[postgres]"
+# RUN /opt/panda/bin/pip install "git+https://github.com/PanDAWMS/panda-server.git#egg=panda-server[postgres]"
+RUN /opt/panda/bin/pip install "git+https://github.com/wguanicedew/panda-server.git#egg=panda-server[postgres]"
 RUN mkdir /tmp/src
 WORKDIR /tmp/src
 COPY . .
