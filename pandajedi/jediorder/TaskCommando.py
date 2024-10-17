@@ -6,6 +6,7 @@ import time
 import traceback
 
 from pandacommon.pandalogger.PandaLogger import PandaLogger
+
 from pandajedi.jediconfig import jedi_config
 from pandajedi.jedicore import Interaction
 from pandajedi.jedicore.JediTaskSpec import JediTaskSpec
@@ -33,7 +34,7 @@ class TaskCommando(JediKnight):
         JediKnight.start(self)
         # go into main loop
         while True:
-            startTime = datetime.datetime.utcnow()
+            startTime = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
             try:
                 # get logger
                 tmpLog = MsgWrapper(logger)
@@ -65,7 +66,7 @@ class TaskCommando(JediKnight):
                 tmpLog.error(f"failed in {self.__class__.__name__}.start() with {str(e)} {traceback.format_exc()}")
             # sleep if needed
             loopCycle = jedi_config.tcommando.loopCycle
-            timeDelta = datetime.datetime.utcnow() - startTime
+            timeDelta = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - startTime
             sleepPeriod = loopCycle - timeDelta.seconds
             if sleepPeriod > 0:
                 time.sleep(sleepPeriod)
@@ -268,13 +269,50 @@ class TaskCommandoThread(WorkerThread):
                             releaseUnstaged = True
                         else:
                             releaseUnstaged = False
-                        tmpRet, newTaskStatus = self.taskBufferIF.retryTask_JEDI(
-                            jediTaskID, commandStr, retryChildTasks=retryChildTasks, discardEvents=discardEvents, release_unstaged=releaseUnstaged
+                        # keep gshare and priority
+                        if "keep " in commentStr:
+                            keep_share_priority = True
+                        else:
+                            keep_share_priority = False
+                        tmpRet, newTaskStatus, retried_tasks = self.taskBufferIF.retryTask_JEDI(
+                            jediTaskID,
+                            commandStr,
+                            retryChildTasks=retryChildTasks,
+                            discardEvents=discardEvents,
+                            release_unstaged=releaseUnstaged,
+                            keep_share_priority=keep_share_priority,
                         )
                         if tmpRet is True:
                             tmpMsg = f"set task_status={newTaskStatus}"
                             tmpLog.sendMsg(tmpMsg, self.msgType)
                             tmpLog.info(tmpMsg)
+                            if newTaskStatus in ["rerefine", "ready"]:
+                                tmpStat, task_spec = self.taskBufferIF.getTaskWithID_JEDI(jediTaskID)
+                                if tmpStat and task_spec.is_msg_driven():
+                                    # msg driven
+                                    if newTaskStatus == "rerefine":
+                                        push_ret = self.taskBufferIF.push_task_trigger_message("jedi_contents_feeder", jediTaskID)
+                                        if push_ret:
+                                            tmpLog.debug("pushed trigger message to jedi_contents_feeder")
+                                        else:
+                                            tmpLog.warning("failed to push trigger message to jedi_contents_feeder")
+                                    elif newTaskStatus == "ready":
+                                        push_ret = self.taskBufferIF.push_task_trigger_message("jedi_job_generator", jediTaskID)
+                                        if push_ret:
+                                            tmpLog.debug("pushed trigger message to jedi_job_generator")
+                                        else:
+                                            tmpLog.warning("failed to push trigger message to jedi_job_generator")
+                            # reset global share and priority
+                            if not keep_share_priority:
+                                for task_id in retried_tasks:
+                                    try:
+                                        global_share = RefinerUtils.get_initial_global_share(self.taskBufferIF, task_id)
+                                        self.taskBufferIF.reassignShare([task_id], global_share, True)
+                                        tmp_msg = f"reset gshare={global_share} to jediTaskID={task_id}"
+                                        tmpLog.info(tmp_msg)
+                                    except Exception as e:
+                                        tmpLog.error(f"failed to reset gshare for {task_id} with {str(e)}")
+
                         tmpLog.info(f"done with {tmpRet}")
                     else:
                         tmpLog.error("unknown command")

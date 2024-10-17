@@ -2,6 +2,8 @@ import enum
 import math
 import re
 
+from pandaserver.taskbuffer import task_split_rules
+
 """
 task specification for JEDI
 
@@ -102,113 +104,10 @@ class JediTaskSpec(object):
     _limitLength = {"errorDialog": 255}
     # attribute length
     _attrLength = {"workingGroup": 32}
+
     # tokens for split rule
-    splitRuleToken = {
-        "allowEmptyInput": "AE",
-        "addNthFieldToLFN": "AN",
-        "allowPartialFinish": "AP",
-        "altStageOut": "AT",
-        "avoidVP": "AV",
-        "maxCoreCount": "CC",
-        "cloudAsVO": "CV",
-        "ddmBackEnd": "DE",
-        "disableAutoFinish": "DF",
-        "disableReassign": "DI",
-        "debugMode": "DM",
-        "disableAutoRetry": "DR",
-        "dynamicNumEvents": "DY",
-        "nEsConsumers": "EC",
-        "nEventsPerInput": "EI",
-        "encJobParams": "EJ",
-        "nEventsPerWorker": "ES",
-        "firstContentsFeed": "FC",
-        "failGoalUnreached": "FG",
-        "fineGrainedProc": "FP",
-        "firstEvent": "FT",
-        "fullChain": "FU",
-        "groupBoundaryID": "GB",
-        "hpoWorkflow": "HO",
-        "instantiateTmplSite": "IA",
-        "inFilePosEvtNum": "IF",
-        "ipStack": "IK",
-        "allowInputLAN": "IL",
-        "ignoreMissingInDS": "IM",
-        "intermediateTask": "IN",
-        "ipConnectivity": "IP",
-        "inputPreStaging": "IS",
-        "instantiateTmpl": "IT",
-        "allowInputWAN": "IW",
-        "noLoopingCheck": "LC",
-        "useLocalIO": "LI",
-        "limitedSites": "LS",
-        "loadXML": "LX",
-        "minCpuEfficiency": "MC",
-        "messageDriven": "MD",
-        "mergeEsOnOS": "ME",
-        "nMaxFilesPerJob": "MF",
-        "maxJumboPerSite": "MJ",
-        "maxNumJobs": "MN",
-        "mergeOutput": "MO",
-        "multiStepExec": "MS",
-        "maxWalltime": "MW",
-        "maxEventsPerJob": "MX",
-        "noExecStrCnv": "NC",
-        "notDiscardEvents": "ND",
-        "nEventsPerJob": "NE",
-        "nFilesPerJob": "NF",
-        "nGBPerJob": "NG",
-        "noInputPooling": "NI",
-        "nJumboJobs": "NJ",
-        "nSitesPerJob": "NS",
-        "nChunksToWait": "NT",
-        "noWaitParent": "NW",
-        "orderInputBy": "OI",
-        "orderByLB": "OL",
-        "onSiteMerging": "OM",
-        "osMatching": "OS",
-        "onlyTagsForFC": "OT",
-        "pushStatusChanges": "PC",
-        "pushJob": "PJ",
-        "pfnList": "PL",
-        "putLogToOS": "PO",
-        "runUntilClosed": "RC",
-        "registerDatasets": "RD",
-        "registerEsFiles": "RE",
-        "respectLB": "RL",
-        "reuseSecOnDemand": "RO",
-        "releasePerLB": "RP",
-        "respectSplitRule": "RR",
-        "randomSeed": "RS",
-        "retryRamOffset": "RX",
-        "retryRamStep": "RY",
-        "resurrectConsumers": "SC",
-        "switchEStoNormal": "SE",
-        "stayOutputOnSite": "SO",
-        "scoutSuccessRate": "SS",
-        "useSecrets": "ST",
-        "segmentedWork": "SW",
-        "totNumJobs": "TJ",
-        "tgtMaxOutputForNG": "TN",
-        "t1Weight": "TW",
-        "useBuild": "UB",
-        "useJobCloning": "UC",
-        "useRealNumEvents": "UE",
-        "useFileAsSourceLFN": "UF",
-        "usePrePro": "UP",
-        "useScout": "US",
-        "usePrefetcher": "UT",
-        "useExhausted": "UX",
-        "useZipToPin": "UZ",
-        "writeInputToFile": "WF",
-        "waitInput": "WI",
-        "maxAttemptES": "XA",
-        "decAttOnFailedES": "XF",
-        "maxAttemptEsJob": "XJ",
-        "nEventsPerMergeJob": "ZE",
-        "nFilesPerMergeJob": "ZF",
-        "nGBPerMergeJob": "ZG",
-        "nMaxFilesPerMergeJob": "ZM",
-    }
+    splitRuleToken = task_split_rules.split_rule_dict
+
     # enum for preprocessing
     enum_toPreProcess = "1"
     enum_preProcessed = "2"
@@ -844,16 +743,6 @@ class JediTaskSpec(object):
 
     commandStatusMap = classmethod(commandStatusMap)
 
-    # set task status to active
-    def setInActive(self):
-        # change status
-        if self.status == "pending":
-            self.status = self.oldStatus
-            self.oldStatus = None
-            self.errorDialog = None
-        # reset error dialog
-        self.setErrDiag(None)
-
     # set error dialog
     def setErrDiag(self, diag, append=False, prepend=False):
         # check if message can be encoded with UTF-8
@@ -972,10 +861,6 @@ class JediTaskSpec(object):
             if tmpMatch is not None:
                 return True
         return False
-
-    # disable input prestaging
-    def disableInputPreStaging(self):
-        self.setSplitRule("inputPreStaging", self.enum_inputPreStaging["notUse"])
 
     # set DDM backend
     def setDdmBackEnd(self, backEnd):
@@ -1321,10 +1206,6 @@ class JediTaskSpec(object):
     def useZipToPin(self):
         return self.check_split_rule("useZipToPin")
 
-    # require OS matching
-    def osMatching(self):
-        return self.check_split_rule("osMatching")
-
     # architecture: sw_platform<@base_platform><#host_cpu_spec><&host_gpu_spec>
     # host_cpu_spec: architecture<-vendor<-instruction_set>>
     # host_gpu_spec: vendor<-model>
@@ -1367,18 +1248,26 @@ class JediTaskSpec(object):
                     return None
                 arch = self.architecture.split("-")[0]
                 if arch:
-                    return {"arch": arch, "vendor": "*", "instr": "*"}
+                    return [{"arch": arch, "vendor": "*", "instr": "*"}]
                 return None
             m = re.search(r"#([^\^@&]*)", self.architecture)
-            spec_str = m.group(1)
-            if not spec_str:
+            spec_strs = m.group(1)
+            if not spec_strs:
                 return None
-            spec_str += "-*" * (2 - spec_str.count("-"))
-            if "-" not in spec_str:
-                spec_str += "-*"
-            items = spec_str.split("-")
-            spec = {"arch": items[0], "vendor": items[1], "instr": items[2]}
-            return spec
+            # remove ()
+            if spec_strs.startswith("("):
+                spec_strs = spec_strs[1:]
+            if spec_strs.endswith(")"):
+                spec_strs = spec_strs[:-1]
+            specs = []
+            for spec_str in spec_strs.split("|"):
+                spec_str += "-*" * (2 - spec_str.count("-"))
+                if "-" not in spec_str:
+                    spec_str += "-*"
+                items = spec_str.split("-")
+                spec = {"arch": items[0], "vendor": items[1], "instr": items[2]}
+                specs.append(spec)
+            return specs
         except Exception:
             return None
 
@@ -1600,17 +1489,31 @@ class JediTaskSpec(object):
 
     # check if message driven
     def is_msg_driven(self):
-        return self.check_split_rule("messageDriven")
+        return is_msg_driven(self.splitRule)
+
+    # check if incomplete input datasets are allowed
+    def allow_incomplete_input(self):
+        return self.check_split_rule("allowIncompleteInDS")
 
 
 # utils
 
 
-# check if push status changes without class instance
-def push_status_changes(split_rule):
+# check split rule with positive integer
+def check_split_rule_positive_int(key, split_rule):
     if not split_rule:
         return False
-    tmpMatch = re.search(JediTaskSpec.splitRuleToken["pushStatusChanges"] + r"=(\d+)", split_rule)
+    tmpMatch = re.search(JediTaskSpec.splitRuleToken[key] + r"=(\d+)", split_rule)
     if not tmpMatch or int(tmpMatch.group(1)) <= 0:
         return False
     return True
+
+
+# check if push status changes without class instance
+def push_status_changes(split_rule):
+    return check_split_rule_positive_int("pushStatusChanges", split_rule)
+
+
+# check if message driven without class instance
+def is_msg_driven(split_rule):
+    return check_split_rule_positive_int("messageDriven", split_rule)

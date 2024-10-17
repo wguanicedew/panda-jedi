@@ -39,7 +39,7 @@ class JobThrottlerBase(object):
         self.maxNumJobs = None
         self.minPriority = None
         self.underNqLimit = False
-        self.siteMapper = self.taskBufferIF.getSiteMapper()
+        self.siteMapper = self.taskBufferIF.get_site_mapper()
 
     # set maximum number of jobs to be submitted
     def setMaxNumJobs(self, maxNumJobs):
@@ -234,7 +234,11 @@ class JobThrottlerBase(object):
 
         # params
         nBunch = 4
-        threshold = self.taskBufferIF.getConfigValue(self.comp_name, "THROTTLE_THRESHOLD", self.app, vo)
+        work_shortage = self.taskBufferIF.getConfigValue("core", "WORK_SHORTAGE", self.app, vo)
+        if work_shortage is True:
+            threshold = self.taskBufferIF.getConfigValue(self.comp_name, "THROTTLE_THRESHOLD_FOR_WORK_SHORTAGE", self.app, vo)
+        else:
+            threshold = self.taskBufferIF.getConfigValue(self.comp_name, "THROTTLE_THRESHOLD", self.app, vo)
         if threshold is None:
             threshold = 2.0
         nJobsInBunchMax = 600

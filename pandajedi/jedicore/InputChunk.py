@@ -11,8 +11,8 @@ logger = PandaLogger().getLogger(__name__.split(".")[-1])
 
 # class for input
 class InputChunk:
-    # default output size 2G + 500MB (safety merging)
-    defaultOutputSize = 2500 * 1024 * 1024
+    # default output size 1G + 500MB (safety merging)
+    defaultOutputSize = 1500 * 1024 * 1024
     # max input size for scouts in MB
     maxInputSizeScouts = 50000
     # max input size for jobs after avalanche in MB
@@ -336,7 +336,7 @@ class InputChunk:
             else:
                 maxNumFiles = self.taskSpec.getMaxNumFilesPerMergeJob()
             # get one subchunk
-            subChunk = self.getSubChunk(
+            subChunk, _ = self.getSubChunk(
                 None, nFilesPerJob=nFilesPerJob, nEventsPerJob=nEventsPerJob, useBoundary=useBoundary, respectLB=respectLB, maxNumFiles=maxNumFiles
             )
             if subChunk is None:
@@ -424,9 +424,10 @@ class InputChunk:
         max_events=None,
         skip_short_output=False,
     ):
+        is_short = False
         # check if there are unused files/events
         if not self.checkUnused():
-            return None
+            return None, is_short
         # protection against unreasonable values
         if nFilesPerJob == 0 or dynNumEvents:
             nFilesPerJob = None
@@ -955,7 +956,7 @@ class InputChunk:
         if dynNumEvents and min_walltime and min_walltime > expWalltime:
             if enableLog and tmpLog:
                 tmpLog.debug(f"expected walltime {expWalltime} less than min walltime {min_walltime} at {siteName}")
-                return []
+                return [], is_short
         # make copy to return
         returnList = []
         for tmpDatasetID, inputFileList in inputFileMap.items():
@@ -978,7 +979,7 @@ class InputChunk:
             tmpDatasetSpec = self.getDatasetWithID(tmpDatasetID)
             returnList.append((tmpDatasetSpec, tmpRetList))
         # dump only problematic splitting
-        is_short = False
+        err_msg = ""
         if returnList:
             if maxNumEvents and inputNumEvents < maxNumEvents:
                 is_short = True
@@ -991,9 +992,9 @@ class InputChunk:
             if enableLog and tmpLog:
                 tmpLog.debug(err_msg)
             if skip_short_output:
-                return None
+                return None, is_short
         # return
-        return returnList
+        return returnList, is_short
 
     # check if master is mutable
     def isMutableMaster(self):
@@ -1008,31 +1009,10 @@ class InputChunk:
 
         return False
 
-    # skip unavailable files in distributed datasets
-    def skipUnavailableFiles(self):
-        # skip files if no candiate have them
-        nSkip = 0
-        for tmpDatasetSpec in self.getDatasets():
-            if tmpDatasetSpec.isDistributed():
-                datasetUsage = self.datasetMap[tmpDatasetSpec.datasetID]
-                while len(tmpDatasetSpec.Files) > datasetUsage["used"]:
-                    tmpFileSpec = tmpDatasetSpec.Files[datasetUsage["used"]]
-                    isOK = False
-                    for siteCandidate in self.siteCandidates.values():
-                        if siteCandidate.isAvailableFile(tmpFileSpec):
-                            isOK = True
-                            break
-                    if isOK:
-                        break
-                    # skip and check the next
-                    datasetUsage["used"] += 1
-                    nSkip += 1
-        return nSkip
-
     # get max ramCount
     def getMaxRamCount(self):
         if self.isMerging:
-            return max(self.taskSpec.mergeRamCount, self.ramCount) if self.taskSpec.mergeRamCount else self.ramCount
+            return max(self.taskSpec.mergeRamCount, self.ramCount, 2000) if self.taskSpec.mergeRamCount else self.ramCount
         else:
             return max(self.taskSpec.ramCount, self.ramCount) if self.taskSpec.ramCount else self.ramCount
 

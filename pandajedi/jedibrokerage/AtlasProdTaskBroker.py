@@ -1,10 +1,19 @@
 import copy
+import datetime
 import math
 import random
 import sys
 import traceback
 
 from pandacommon.pandalogger.PandaLogger import PandaLogger
+from pandaserver.dataservice import DataServiceUtils
+from pandaserver.dataservice.DataServiceUtils import select_scope
+from pandaserver.taskbuffer import JobUtils
+from pandaserver.userinterface import Client as PandaClient
+
+# cannot use pandaserver.taskbuffer while Client is used
+from taskbuffer.JobSpec import JobSpec
+
 from pandajedi.jedicore import Interaction
 from pandajedi.jedicore.MsgWrapper import MsgWrapper
 from pandajedi.jedicore.ThreadUtils import (
@@ -14,13 +23,6 @@ from pandajedi.jedicore.ThreadUtils import (
     WorkerThread,
 )
 from pandajedi.jedirefine import RefinerUtils
-from pandaserver.dataservice import DataServiceUtils
-from pandaserver.dataservice.DataServiceUtils import select_scope
-from pandaserver.taskbuffer import JobUtils
-from pandaserver.userinterface import Client as PandaClient
-
-# cannot use pandaserver.taskbuffer while Client is used
-from taskbuffer.JobSpec import JobSpec
 
 from . import AtlasBrokerUtils
 from .AtlasProdJobBroker import AtlasProdJobBroker
@@ -37,162 +39,32 @@ class AtlasProdTaskBroker(TaskBrokerBase):
 
     # main to check
     def doCheck(self, taskSpecList):
-        # make logger
-        tmpLog = MsgWrapper(logger)
-        tmpLog.debug("start doCheck")
-        # return for failure
-        retFatal = self.SC_FATAL, {}
-        retTmpError = self.SC_FAILED, {}
-        # get list of jediTaskIDs
-        taskIdList = []
-        taskSpecMap = {}
-        for taskSpec in taskSpecList:
-            taskIdList.append(taskSpec.jediTaskID)
-            taskSpecMap[taskSpec.jediTaskID] = taskSpec
-        # check with panda
-        tmpLog.debug("check with panda")
-        tmpPandaStatus, cloudsInPanda = PandaClient.seeCloudTask(taskIdList)
-        if tmpPandaStatus != 0:
-            tmpLog.error("failed to see clouds")
-            return retTmpError
-        # make return map
-        retMap = {}
-        for tmpTaskID, tmpCoreName in cloudsInPanda.items():
-            tmpLog.debug(f"jediTaskID={tmpTaskID} -> {tmpCoreName}")
-            if tmpCoreName not in ["NULL", "", None]:
-                taskSpec = taskSpecMap[tmpTaskID]
-                if taskSpec.useWorldCloud():
-                    # get destinations for WORLD cloud
-                    ddmIF = self.ddmIF.getInterface(taskSpec.vo)
-                    # get site
-                    siteSpec = self.siteMapper.getSite(tmpCoreName)
-                    scopeSiteSpec_input, scopeSiteSpec_output = select_scope(
-                        siteSpec, taskSpec.prodSourceLabel, JobUtils.translate_tasktype_to_jobtype(taskSpec.taskType)
-                    )
-                    # get nucleus
-                    nucleus = siteSpec.pandasite
-                    # get output/log datasets
-                    tmpStat, tmpDatasetSpecs = self.taskBufferIF.getDatasetsWithJediTaskID_JEDI(tmpTaskID, ["output", "log"])
-                    # get destinations
-                    retMap[tmpTaskID] = {"datasets": [], "nucleus": nucleus}
-                    for datasetSpec in tmpDatasetSpecs:
-                        # skip distributed datasets
-                        if DataServiceUtils.getDistributedDestination(datasetSpec.storageToken) is not None:
-                            continue
-                        # get token
-                        token = ddmIF.convertTokenToEndpoint(siteSpec.ddm_output[scopeSiteSpec_output], datasetSpec.storageToken)
-                        # use default endpoint
-                        if token is None:
-                            token = siteSpec.ddm_output[scopeSiteSpec_output]
-                        # add original token
-                        if datasetSpec.storageToken not in ["", None]:
-                            token += f"/{datasetSpec.storageToken}"
-                        retMap[tmpTaskID]["datasets"].append({"datasetID": datasetSpec.datasetID, "token": f"dst:{token}", "destination": tmpCoreName})
-                else:
-                    retMap[tmpTaskID] = tmpCoreName
-        tmpLog.debug(f"ret {str(retMap)}")
-        # return
-        tmpLog.debug("done")
-        return self.SC_SUCCEEDED, retMap
+        return self.SC_SUCCEEDED, {}
 
     # main to assign
     def doBrokerage(self, inputList, vo, prodSourceLabel, workQueue, resource_name):
         # list with a lock
         inputListWorld = ListWithLock([])
-        # variables for submission
-        maxBunchTask = 100
+
         # make logger
         tmpLog = MsgWrapper(logger)
         tmpLog.debug("start doBrokerage")
+
         # return for failure
-        retFatal = self.SC_FATAL
         retTmpError = self.SC_FAILED
         tmpLog.debug(f"vo={vo} label={prodSourceLabel} queue={workQueue.queue_name} resource_name={resource_name} nTasks={len(inputList)}")
-        # loop over all tasks
+
+        # build the map with Remaining Work by priority
         allRwMap = {}
-        prioMap = {}
-        tt2Map = {}
-        expRWs = {}
-        jobSpecList = []
+
+        # loop over all tasks and build the list of WORLD tasks. Nowadays all tasks are WORLD
         for tmpJediTaskID, tmpInputList in inputList:
             for taskSpec, cloudName, inputChunk in tmpInputList:
-                # collect tasks for WORLD
                 if taskSpec.useWorldCloud():
                     inputListWorld.append((taskSpec, inputChunk))
-                    continue
-                # make JobSpec to be submitted for TaskAssigner
-                jobSpec = JobSpec()
-                jobSpec.taskID = taskSpec.jediTaskID
-                jobSpec.jediTaskID = taskSpec.jediTaskID
-                # set managed to trigger TA
-                jobSpec.prodSourceLabel = "managed"
-                jobSpec.processingType = taskSpec.processingType
-                jobSpec.workingGroup = taskSpec.workingGroup
-                jobSpec.metadata = taskSpec.processingType
-                jobSpec.assignedPriority = taskSpec.taskPriority
-                jobSpec.currentPriority = taskSpec.currentPriority
-                jobSpec.maxDiskCount = (taskSpec.getOutDiskSize() + taskSpec.getWorkDiskSize()) // 1024 // 1024
-                if taskSpec.useWorldCloud():
-                    # use destinationSE to trigger task brokerage in WORLD cloud
-                    jobSpec.destinationSE = taskSpec.cloud
-                prodDBlock = None
-                setProdDBlock = False
-                for datasetSpec in inputChunk.getDatasets():
-                    prodDBlock = datasetSpec.datasetName
-                    if datasetSpec.isMaster():
-                        jobSpec.prodDBlock = datasetSpec.datasetName
-                        setProdDBlock = True
-                    for fileSpec in datasetSpec.Files:
-                        tmpInFileSpec = fileSpec.convertToJobFileSpec(datasetSpec)
-                        jobSpec.addFile(tmpInFileSpec)
-                # use secondary dataset name as prodDBlock
-                if setProdDBlock is False and prodDBlock is not None:
-                    jobSpec.prodDBlock = prodDBlock
-                # append
-                jobSpecList.append(jobSpec)
-                prioMap[jobSpec.taskID] = jobSpec.currentPriority
-                tt2Map[jobSpec.taskID] = jobSpec.processingType
-                # get RW for a priority
-                if jobSpec.currentPriority not in allRwMap:
-                    tmpRW = self.taskBufferIF.calculateRWwithPrio_JEDI(vo, prodSourceLabel, workQueue, jobSpec.currentPriority)
-                    if tmpRW is None:
-                        tmpLog.error(f"failed to calculate RW with prio={jobSpec.currentPriority}")
-                        return retTmpError
-                    allRwMap[jobSpec.currentPriority] = tmpRW
-                # get expected RW
-                expRW = self.taskBufferIF.calculateTaskRW_JEDI(jobSpec.jediTaskID)
-                if expRW is None:
-                    tmpLog.error(f"failed to calculate RW for jediTaskID={jobSpec.jediTaskID}")
-                    return retTmpError
-                expRWs[jobSpec.taskID] = expRW
-        # for old clouds
-        if jobSpecList != []:
-            # get fullRWs
-            fullRWs = self.taskBufferIF.calculateRWwithPrio_JEDI(vo, prodSourceLabel, None, None)
-            if fullRWs is None:
-                tmpLog.error("failed to calculate full RW")
-                return retTmpError
-            # set metadata
-            for jobSpec in jobSpecList:
-                rwValues = allRwMap[jobSpec.currentPriority]
-                jobSpec.metadata = f"{jobSpec.metadata};{str(rwValues)};{str(expRWs)};{str(prioMap)};{str(fullRWs)};{str(tt2Map)}"
-            tmpLog.debug(f"run task assigner for {len(jobSpecList)} tasks")
-            nBunchTask = 0
-            while nBunchTask < len(jobSpecList):
-                # get a bunch
-                jobsBunch = jobSpecList[nBunchTask : nBunchTask + maxBunchTask]
-                strIDs = "jediTaskID="
-                for tmpJobSpec in jobsBunch:
-                    strIDs += f"{tmpJobSpec.taskID},"
-                strIDs = strIDs[:-1]
-                tmpLog.debug(strIDs)
-                # increment index
-                nBunchTask += maxBunchTask
-                # run task brokerge
-                stS, outSs = PandaClient.runTaskAssignment(jobsBunch)
-                tmpLog.debug(f"{stS}:{str(outSs)}")
-        # for WORLD
-        if len(inputListWorld) > 0:
+
+        # broker WORLD tasks
+        if inputListWorld:
             # thread pool
             threadPool = ThreadPool()
             # get full RW for WORLD
@@ -208,6 +80,7 @@ class AtlasProdTaskBroker(TaskBrokerBase):
                         tmpLog.error(f"failed to calculate RW with prio={taskSpec.currentPriority}")
                         return retTmpError
                     allRwMap[taskSpec.currentPriority] = tmpRW
+
             # live counter for RWs
             liveCounter = MapWithLock(allRwMap)
             # make workers
@@ -308,9 +181,13 @@ class AtlasProdTaskBrokerThread(WorkerThread):
         maxTaskPrioWithLD = self.taskBufferIF.getConfigValue(self.msgType, "MAX_TASK_PRIO_WITH_LOCAL_DATA", "jedi", "atlas")
         if maxTaskPrioWithLD is None:
             maxTaskPrioWithLD = 800
+        # ignore data locality once the period passes (in days)
+        data_location_check_period = self.taskBufferIF.getConfigValue(self.msgType, "DATA_LOCATION_CHECK_PERIOD", "jedi", "atlas")
+        if not data_location_check_period:
+            data_location_check_period = 7
         # main
         lastJediTaskID = None
-        siteMapper = self.taskBufferIF.getSiteMapper()
+        siteMapper = self.taskBufferIF.get_site_mapper()
         while True:
             try:
                 taskInputList = self.inputList.get(1)
@@ -500,97 +377,102 @@ class AtlasProdTaskBrokerThread(WorkerThread):
                             continue
                         ######################################
                         # data locality
-                        toSkip = False
+                        time_now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
                         availableData = {}
-                        for datasetSpec in inputChunk.getDatasets():
-                            # only for real datasets
-                            if datasetSpec.isPseudo():
-                                continue
-                            # ignore DBR
-                            if DataServiceUtils.isDBR(datasetSpec.datasetName):
-                                continue
-                            # skip locality check
-                            if DataServiceUtils.getDatasetType(datasetSpec.datasetName) in datasetTypeToSkipCheck:
-                                continue
-                            # primary only
-                            if taskParamMap.get("taskBrokerOnMaster") is True and not datasetSpec.isMaster():
-                                continue
-                            # use deep scan for primary dataset unless data carousel
-                            if datasetSpec.isMaster() and not taskSpec.inputPreStaging():
-                                deepScan = True
-                            else:
-                                deepScan = False
-                            # get nuclei where data is available
-                            tmpSt, tmpRet = AtlasBrokerUtils.getNucleiWithData(
-                                siteMapper, self.ddmIF, datasetSpec.datasetName, list(nucleusList.keys()), deepScan
-                            )
-                            if tmpSt != Interaction.SC_SUCCEEDED:
-                                self.post_process_for_error(taskSpec, tmpLog, f"failed to get nuclei where data is available, since {tmpRet}", False)
-                                toSkip = True
-                                break
-                            # sum
-                            for tmpNucleus, tmpVals in tmpRet.items():
-                                if tmpNucleus not in availableData:
-                                    availableData[tmpNucleus] = tmpVals
+                        if taskSpec.frozenTime and time_now - taskSpec.frozenTime > datetime.timedelta(days=data_location_check_period):
+                            tmpLog.info(f"disabled data check since the task was in assigning for " f"{data_location_check_period} days")
+                        else:
+                            toSkip = False
+                            for datasetSpec in inputChunk.getDatasets():
+                                # only for real datasets
+                                if datasetSpec.isPseudo():
+                                    continue
+                                # ignore DBR
+                                if DataServiceUtils.isDBR(datasetSpec.datasetName):
+                                    continue
+                                # skip locality check
+                                if DataServiceUtils.getDatasetType(datasetSpec.datasetName) in datasetTypeToSkipCheck:
+                                    continue
+                                # primary only
+                                if taskParamMap.get("taskBrokerOnMaster") is True and not datasetSpec.isMaster():
+                                    continue
+                                # use deep scan for primary dataset unless data carousel
+                                if datasetSpec.isMaster() and not taskSpec.inputPreStaging():
+                                    deepScan = True
                                 else:
-                                    availableData[tmpNucleus] = dict((k, v + tmpVals[k]) for (k, v) in availableData[tmpNucleus].items())
-                        if toSkip:
-                            continue
-                        if availableData != {}:
-                            newNucleusList = {}
-                            oldNucleusList = copy.copy(nucleusList)
-                            # skip if no data
-                            skipMsgList = []
-                            for tmpNucleus, tmpNucleusSpec in nucleusList.items():
-                                if taskSpec.inputPreStaging() and availableData[tmpNucleus]["ava_num_any"] > 0:
-                                    # use incomplete replicas for data carousel since the completeness is guaranteed
-                                    newNucleusList[tmpNucleus] = tmpNucleusSpec
-                                elif (
-                                    availableData[tmpNucleus]["tot_size"] > thrInputSize
-                                    and availableData[tmpNucleus]["ava_size_any"] < availableData[tmpNucleus]["tot_size"] * thrInputSizeFrac
-                                ):
-                                    tmpMsg = "  skip nucleus={0} due to insufficient input size {1}B < {2}*{3} criteria=-insize".format(
-                                        tmpNucleus, availableData[tmpNucleus]["ava_size_any"], availableData[tmpNucleus]["tot_size"], thrInputSizeFrac
-                                    )
-                                    skipMsgList.append(tmpMsg)
-                                elif (
-                                    availableData[tmpNucleus]["tot_num"] > thrInputNum
-                                    and availableData[tmpNucleus]["ava_num_any"] < availableData[tmpNucleus]["tot_num"] * thrInputNumFrac
-                                ):
-                                    tmpMsg = "  skip nucleus={0} due to short number of input files {1} < {2}*{3} criteria=-innum".format(
-                                        tmpNucleus, availableData[tmpNucleus]["ava_num_any"], availableData[tmpNucleus]["tot_num"], thrInputNumFrac
-                                    )
-                                    skipMsgList.append(tmpMsg)
-                                else:
-                                    newNucleusList[tmpNucleus] = tmpNucleusSpec
-                            totInputSize = list(availableData.values())[0]["tot_size"] / 1024 / 1024 / 1024
-                            data_locality_check_str = (
-                                "(ioIntensity ({0}) is None or less than {1} kBPerS "
-                                "and input size ({2} GB) is less than {3}) "
-                                "or task.currentPriority ({4}) is higher than or equal to {5}"
-                            ).format(
-                                taskSpec.ioIntensity, minIoIntensityWithLD, int(totInputSize), minInputSizeWithLD, taskSpec.currentPriority, maxTaskPrioWithLD
-                            )
-                            if len(newNucleusList) > 0:
-                                nucleusList = newNucleusList
-                                for tmpMsg in skipMsgList:
-                                    tmpLog.info(tmpMsg)
-                            elif (
-                                (taskSpec.ioIntensity is None or taskSpec.ioIntensity <= minIoIntensityWithLD) and totInputSize <= minInputSizeWithLD
-                            ) or taskSpec.currentPriority >= maxTaskPrioWithLD:
-                                availableData = {}
-                                tmpLog.info(f"  disable data locality check since no nucleus has input data, {data_locality_check_str}")
-                            else:
-                                # no candidate + unavoidable data locality check
-                                nucleusList = newNucleusList
-                                for tmpMsg in skipMsgList:
-                                    tmpLog.info(tmpMsg)
-                                tmpLog.info(f"  the following conditions required to disable data locality check: {data_locality_check_str}")
-                            tmpLog.info(f"{len(nucleusList)} candidates passed data check")
-                            self.add_summary_message(oldNucleusList, nucleusList, "data check")
-                            if not nucleusList:
-                                self.post_process_for_error(taskSpec, tmpLog, "no candidates")
+                                    deepScan = False
+                                # get nuclei where data is available
+                                tmpSt, tmpRet = AtlasBrokerUtils.getNucleiWithData(
+                                    siteMapper, self.ddmIF, datasetSpec.datasetName, list(nucleusList.keys()), deepScan
+                                )
+                                if tmpSt != Interaction.SC_SUCCEEDED:
+                                    self.post_process_for_error(taskSpec, tmpLog, f"failed to get nuclei where data is available, since {tmpRet}", False)
+                                    toSkip = True
+                                    break
+                                # sum
+                                for tmpNucleus, tmpVals in tmpRet.items():
+                                    if tmpNucleus not in availableData:
+                                        availableData[tmpNucleus] = tmpVals
+                                    else:
+                                        availableData[tmpNucleus] = dict((k, v + tmpVals[k]) for (k, v) in availableData[tmpNucleus].items())
+                            if toSkip:
                                 continue
+                            if availableData != {}:
+                                newNucleusList = {}
+                                oldNucleusList = copy.copy(nucleusList)
+                                # skip if no data
+                                skipMsgList = []
+                                for tmpNucleus, tmpNucleusSpec in nucleusList.items():
+                                    if taskSpec.inputPreStaging() and availableData[tmpNucleus]["ava_num_any"] > 0:
+                                        # use incomplete replicas for data carousel since the completeness is guaranteed
+                                        newNucleusList[tmpNucleus] = tmpNucleusSpec
+                                    elif (
+                                        availableData[tmpNucleus]["tot_size"] > thrInputSize
+                                        and availableData[tmpNucleus]["ava_size_any"] < availableData[tmpNucleus]["tot_size"] * thrInputSizeFrac
+                                    ):
+                                        tmpMsg = "  skip nucleus={0} due to insufficient input size {1}B < {2}*{3} criteria=-insize".format(
+                                            tmpNucleus, availableData[tmpNucleus]["ava_size_any"], availableData[tmpNucleus]["tot_size"], thrInputSizeFrac
+                                        )
+                                        skipMsgList.append(tmpMsg)
+                                    elif (
+                                        availableData[tmpNucleus]["tot_num"] > thrInputNum
+                                        and availableData[tmpNucleus]["ava_num_any"] < availableData[tmpNucleus]["tot_num"] * thrInputNumFrac
+                                    ):
+                                        tmpMsg = "  skip nucleus={0} due to short number of input files {1} < {2}*{3} criteria=-innum".format(
+                                            tmpNucleus, availableData[tmpNucleus]["ava_num_any"], availableData[tmpNucleus]["tot_num"], thrInputNumFrac
+                                        )
+                                        skipMsgList.append(tmpMsg)
+                                    else:
+                                        newNucleusList[tmpNucleus] = tmpNucleusSpec
+                                totInputSize = list(availableData.values())[0]["tot_size"] / 1024 / 1024 / 1024
+                                data_locality_check_str = (
+                                    f"(ioIntensity ({taskSpec.ioIntensity}) is None or less than {minIoIntensityWithLD} kBPerS "
+                                    f"and input size ({int(totInputSize)} GB) is less than "
+                                    f"{minInputSizeWithLD}) "
+                                    f"or (task.currentPriority ("
+                                    f"{taskSpec.currentPriority}) is higher than or equal to {maxTaskPrioWithLD}) "
+                                    f"or the task is in assigning for {data_location_check_period} days"
+                                )
+                                if len(newNucleusList) > 0:
+                                    nucleusList = newNucleusList
+                                    for tmpMsg in skipMsgList:
+                                        tmpLog.info(tmpMsg)
+                                elif (
+                                    (taskSpec.ioIntensity is None or taskSpec.ioIntensity <= minIoIntensityWithLD) and totInputSize <= minInputSizeWithLD
+                                ) or taskSpec.currentPriority >= maxTaskPrioWithLD:
+                                    availableData = {}
+                                    tmpLog.info(f"  disable data locality check since no nucleus has input data, {data_locality_check_str}")
+                                else:
+                                    # no candidate + unavoidable data locality check
+                                    nucleusList = newNucleusList
+                                    for tmpMsg in skipMsgList:
+                                        tmpLog.info(tmpMsg)
+                                    tmpLog.info(f"  the following conditions required to disable data locality check: {data_locality_check_str}")
+                                tmpLog.info(f"{len(nucleusList)} candidates passed data check")
+                                self.add_summary_message(oldNucleusList, nucleusList, "data check")
+                                if not nucleusList:
+                                    self.post_process_for_error(taskSpec, tmpLog, "no candidates")
+                                    continue
                         ######################################
                         # check for full chain
                         newNucleusList = {}

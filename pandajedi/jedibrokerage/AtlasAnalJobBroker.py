@@ -8,11 +8,12 @@ import traceback
 
 # logger
 from pandacommon.pandalogger.PandaLogger import PandaLogger
+from pandaserver.dataservice.DataServiceUtils import select_scope
+from pandaserver.taskbuffer import JobUtils
+
 from pandajedi.jedicore import Interaction, JediCoreUtils
 from pandajedi.jedicore.MsgWrapper import MsgWrapper
 from pandajedi.jedicore.SiteCandidate import SiteCandidate
-from pandaserver.dataservice.DataServiceUtils import select_scope
-from pandaserver.taskbuffer import JobUtils
 
 from . import AtlasBrokerUtils
 from .JobBrokerBase import JobBrokerBase
@@ -45,7 +46,9 @@ class AtlasAnalJobBroker(JobBrokerBase):
             msg_tag = f"<jediTaskID={taskSpec.jediTaskID} datasetID={inputChunk.masterDataset.datasetID}>"
         else:
             msg_tag = f"<jediTaskID={taskSpec.jediTaskID}>"
-        tmpLog = MsgWrapper(logger, msg_tag, monToken=f"<jediTaskID={taskSpec.jediTaskID} {datetime.datetime.utcnow().isoformat('/')}>")
+        tmpLog = MsgWrapper(
+            logger, msg_tag, monToken=f"<jediTaskID={taskSpec.jediTaskID} {datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat('/')}>"
+        )
         tmpLog.debug("start")
         # return for failure
         retFatal = self.SC_FATAL, inputChunk
@@ -60,16 +63,8 @@ class AtlasAnalJobBroker(JobBrokerBase):
         scanSiteList = []
         # problematic sites
         problematic_sites_dict = {}
-        # used and max queue length of each site for the user
-        user_q_len_dict = {}
-        max_q_len_dict = {}
-        # get list of site access
-        siteAccessList = self.taskBufferIF.listSiteAccess(None, taskSpec.userName)
-        siteAccessMap = {}
-        for tmpSiteName, tmpAccess in siteAccessList:
-            siteAccessMap[tmpSiteName] = tmpAccess
         # disable VP for merging, scouts, and forceStaged
-        if inputChunk.isMerging or taskSpec.avoid_vp() or taskSpec.useScout():
+        if inputChunk.isMerging or taskSpec.avoid_vp() or taskSpec.useScout() or taskSpec.useLocalIO():
             useVP = False
         else:
             useVP = True
@@ -252,6 +247,13 @@ class AtlasAnalJobBroker(JobBrokerBase):
         if max_expected_wait_hour is None:
             max_expected_wait_hour = 12.0
 
+        max_missing_input_files = self.taskBufferIF.getConfigValue("jobbroker", "MAX_MISSING_INPUT_FILES", "jedi", taskSpec.vo)
+        if max_missing_input_files is None:
+            max_missing_input_files = 10
+        min_input_completeness = self.taskBufferIF.getConfigValue("jobbroker", "MIN_INPUT_COMPLETENESS", "jedi", taskSpec.vo)
+        if min_input_completeness is None:
+            min_input_completeness = 90
+
         # throttle User Analysis tasks when close to gshare target
         if taskSpec.gshare in ["User Analysis"] and gshare_usage_dict and task_eval_dict:
             try:
@@ -260,63 +262,38 @@ class AtlasAnalJobBroker(JobBrokerBase):
                     usage_percent = min(usage_percent, l1_share_usage_dict["eqiv_usage_perc"] * 100)
                 task_class_value = task_eval_dict["class"]
                 usage_slot_ratio_A = 0.5
-                usage_slot_ratio_B = 0.5
                 if user_eval_dict:
                     usage_slot_ratio_A = 1.0 - user_eval_dict["rem_slots_A"] / threshold_A
-                    usage_slot_ratio_B = 1.0 - user_eval_dict["rem_slots_B"] / threshold_B
+
                 if task_class_value == -1 and usage_percent > user_analyis_to_throttle_threshold_perc_C:
                     # C-tasks to throttle
-                    if False:
-                        # dry run
-                        tmpLog.error(
-                            "(dry-run) throttle to generate jobs due to gshare {gshare} > {threshold}% of target and task in class C".format(
-                                gshare=taskSpec.gshare, threshold=user_analyis_to_throttle_threshold_perc_C
-                            )
+                    tmpLog.error(
+                        "throttle to generate jobs due to gshare {gshare} > {threshold}% of target and task in class C".format(
+                            gshare=taskSpec.gshare, threshold=user_analyis_to_throttle_threshold_perc_C
                         )
-                    else:
-                        tmpLog.error(
-                            "throttle to generate jobs due to gshare {gshare} > {threshold}% of target and task in class C".format(
-                                gshare=taskSpec.gshare, threshold=user_analyis_to_throttle_threshold_perc_C
-                            )
-                        )
-                        taskSpec.setErrDiag(tmpLog.uploadLog(taskSpec.jediTaskID))
-                        return retTmpError
+                    )
+                    taskSpec.setErrDiag(tmpLog.uploadLog(taskSpec.jediTaskID))
+                    return retTmpError
                 elif task_class_value == 0 and usage_percent > user_analyis_to_throttle_threshold_perc_B:
                     # B-tasks to throttle
-                    if False:
-                        # dry run
-                        tmpLog.error(
-                            "(dry-run) throttle to generate jobs due to gshare {gshare} > {threshold}% of target and task in class B".format(
-                                gshare=taskSpec.gshare, threshold=user_analyis_to_throttle_threshold_perc_B
-                            )
+                    tmpLog.error(
+                        "throttle to generate jobs due to gshare {gshare} > {threshold}% of target and task in class B".format(
+                            gshare=taskSpec.gshare, threshold=user_analyis_to_throttle_threshold_perc_B
                         )
-                    else:
-                        tmpLog.error(
-                            "throttle to generate jobs due to gshare {gshare} > {threshold}% of target and task in class B".format(
-                                gshare=taskSpec.gshare, threshold=user_analyis_to_throttle_threshold_perc_B
-                            )
-                        )
-                        taskSpec.setErrDiag(tmpLog.uploadLog(taskSpec.jediTaskID))
-                        return retTmpError
+                    )
+                    taskSpec.setErrDiag(tmpLog.uploadLog(taskSpec.jediTaskID))
+                    return retTmpError
                 elif (
                     task_class_value == 1 and usage_percent * usage_slot_ratio_A * user_analyis_throttle_intensity_A > user_analyis_to_throttle_threshold_perc_A
                 ):
                     # A-tasks to throttle
-                    if False:
-                        # dry run
-                        tmpLog.error(
-                            "(dry-run) throttle to generate jobs due to gshare {gshare} > {threshold:.3%} of target and task in class A".format(
-                                gshare=taskSpec.gshare, threshold=user_analyis_throttle_intensity_A / (usage_slot_ratio_A + 2**-20)
-                            )
+                    tmpLog.error(
+                        "throttle to generate jobs due to gshare {gshare} > {threshold:.3%} of target and task in class A".format(
+                            gshare=taskSpec.gshare, threshold=user_analyis_throttle_intensity_A / (usage_slot_ratio_A + 2**-20)
                         )
-                    else:
-                        tmpLog.error(
-                            "throttle to generate jobs due to gshare {gshare} > {threshold:.3%} of target and task in class A".format(
-                                gshare=taskSpec.gshare, threshold=user_analyis_throttle_intensity_A / (usage_slot_ratio_A + 2**-20)
-                            )
-                        )
-                        taskSpec.setErrDiag(tmpLog.uploadLog(taskSpec.jediTaskID))
-                        return retTmpError
+                    )
+                    taskSpec.setErrDiag(tmpLog.uploadLog(taskSpec.jediTaskID))
+                    return retTmpError
             except Exception as e:
                 tmpLog.error(f"got error when checking low-ranked tasks to throttle; skipped : {e}")
 
@@ -363,7 +340,7 @@ class AtlasAnalJobBroker(JobBrokerBase):
             elif (
                 loc_check_timeout_val
                 and taskSpec.frozenTime
-                and datetime.datetime.utcnow() - taskSpec.frozenTime > datetime.timedelta(hours=loc_check_timeout_val)
+                and datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - taskSpec.frozenTime > datetime.timedelta(hours=loc_check_timeout_val)
             ):
                 to_ignore_data_loc = True
                 tmp_msg += "check timeout (last successful cycle at {} was more than {} ({}hrs) ago)".format(
@@ -406,13 +383,21 @@ class AtlasAnalJobBroker(JobBrokerBase):
             if inputChunk.getDatasets() != [] and checkDataLocality:
                 oldScanSiteList = copy.copy(scanSiteList)
                 oldScanUnifiedSiteList = self.get_unified_sites(oldScanSiteList)
+                complete_disk_ok = {}
+                complete_tape_ok = {}
                 for datasetSpec in inputChunk.getDatasets():
                     datasetName = datasetSpec.datasetName
                     if datasetName not in self.dataSiteMap:
                         # get the list of sites where data is available
                         tmpLog.debug(f"getting the list of sites where {datasetName} is available")
-                        tmpSt, tmpRet = AtlasBrokerUtils.getAnalSitesWithData(
-                            self.get_unified_sites(scanSiteList), self.siteMapper, self.ddmIF, datasetName, element_map.get(datasetSpec.datasetName)
+                        tmpSt, tmpRet, tmp_complete_disk_ok, tmp_complete_tape_ok = AtlasBrokerUtils.get_sites_with_data(
+                            self.get_unified_sites(scanSiteList),
+                            self.siteMapper,
+                            self.ddmIF,
+                            datasetName,
+                            element_map.get(datasetSpec.datasetName),
+                            max_missing_input_files,
+                            min_input_completeness,
                         )
                         if tmpSt in [Interaction.JEDITemporaryError, Interaction.JEDITimeoutError]:
                             tmpLog.error(f"temporary failed to get the list of sites where data is available, since {tmpRet}")
@@ -424,6 +409,8 @@ class AtlasAnalJobBroker(JobBrokerBase):
                             return retFatal
                         # append
                         self.dataSiteMap[datasetName] = tmpRet
+                        complete_disk_ok[datasetName] = tmp_complete_disk_ok
+                        complete_tape_ok[datasetName] = tmp_complete_tape_ok
                         if datasetName.startswith("ddo"):
                             tmpLog.debug(f" {len(tmpRet)} sites")
                         else:
@@ -449,23 +436,28 @@ class AtlasAnalJobBroker(JobBrokerBase):
                                         # disable VP since distributed datasets triggers transfers
                                         useVP = False
                                         avoidVP = True
+                    tmpLog.debug(
+                        f"disk replica: {complete_disk_ok[datasetName]}, tape replica: {complete_tape_ok[datasetName]}, distributed={datasetSpec.isDistributed()}"
+                    )
                     # check if the data is available at somewhere
-                    if self.dataSiteMap[datasetName] == {}:
-                        for tmpSiteName in scanSiteList:
-                            # tmpLog.info('  skip site={0} data is unavailable criteria=-input'.format(tmpSiteName))
-                            pass
-                        tmpLog.error(f"{datasetName} is unavailable at any site")
-                        retVal = retFatal
-                        continue
+                    if not complete_disk_ok[datasetName] and not complete_tape_ok[datasetName] and not datasetSpec.isDistributed():
+                        err_msg = f"{datasetName} is incomplete/missing at online endpoints. "
+                        if not taskSpec.allow_incomplete_input():
+                            tmpLog.error(err_msg)
+                            taskSpec.setErrDiag(err_msg)
+                            retVal = retTmpError
+                            return retVal
+                        else:
+                            err_msg += "However, the task allows incomplete input."
+                            tmpLog.info(err_msg)
                 # get the list of sites where data is available
                 scanSiteList = None
                 scanSiteListOnDisk = None
                 scanSiteListUnion = None
                 scanSiteListOnDiskUnion = None
                 scanSiteWoVpUnion = None
-                normFactor = 0
+
                 for datasetName, tmpDataSite in self.dataSiteMap.items():
-                    normFactor += 1
                     useIncomplete = datasetName in ddsList
                     # get sites where replica is available
                     tmpSiteList = AtlasBrokerUtils.getAnalSitesWithDataDisk(tmpDataSite, includeTape=True, use_incomplete=useIncomplete)
@@ -498,25 +490,28 @@ class AtlasAnalJobBroker(JobBrokerBase):
                         scanSiteListUnion = set(scanSiteList)
                         scanSiteListOnDiskUnion = set(scanSiteListOnDisk)
                         scanSiteWoVpUnion = set(scanSiteWoVP)
-                        continue
-                    # pickup sites which have all data
-                    newScanList = []
-                    for tmpSiteName in tmpSiteList:
-                        if tmpSiteName in scanSiteList and tmpSiteName not in newScanList:
-                            newScanList.append(tmpSiteName)
-                        scanSiteListUnion.add(tmpSiteName)
-                    scanSiteList = newScanList
-                    tmpLog.debug(f"{datasetName} is available at {len(scanSiteList)} sites")
-                    # pickup sites which have all data on DISK
-                    newScanListOnDisk = set()
-                    for tmpSiteName in tmpDiskSiteList:
-                        if tmpSiteName in scanSiteListOnDisk:
-                            newScanListOnDisk.add(tmpSiteName)
-                        scanSiteListOnDiskUnion.add(tmpSiteName)
-                    scanSiteListOnDisk = newScanListOnDisk
-                    # get common elements
-                    scanSiteWoVP = list(set(scanSiteWoVP).intersection(tmpNonVpSiteList))
-                    scanSiteWoVpUnion = scanSiteWoVpUnion.union(tmpNonVpSiteList)
+                    else:
+                        # pickup sites which have all data
+                        newScanList = []
+                        for tmpSiteName in tmpSiteList:
+                            if tmpSiteName in scanSiteList and tmpSiteName not in newScanList:
+                                newScanList.append(tmpSiteName)
+                            scanSiteListUnion.add(tmpSiteName)
+                        scanSiteList = newScanList
+                        tmpLog.debug(f"{datasetName} is available at {len(scanSiteList)} sites")
+                        # pickup sites which have all data on DISK
+                        newScanListOnDisk = set()
+                        for tmpSiteName in tmpDiskSiteList:
+                            if tmpSiteName in scanSiteListOnDisk:
+                                newScanListOnDisk.add(tmpSiteName)
+                            scanSiteListOnDiskUnion.add(tmpSiteName)
+                        scanSiteListOnDisk = newScanListOnDisk
+                        # get common elements
+                        scanSiteWoVP = list(set(scanSiteWoVP).intersection(tmpNonVpSiteList))
+                        scanSiteWoVpUnion = scanSiteWoVpUnion.union(tmpNonVpSiteList)
+                    tmpLog.debug(
+                        f"{datasetName} is available at {len(scanSiteList)} sites. complete disk replica: {complete_disk_ok[datasetName]}, complete tape replica: {complete_tape_ok[datasetName]}"
+                    )
                     tmpLog.debug(f"{datasetName} is available at {len(scanSiteListOnDisk)} sites on DISK")
                 # check for preassigned
                 if sitePreAssigned:
@@ -548,8 +543,9 @@ class AtlasAnalJobBroker(JobBrokerBase):
                 if not scanSiteList:
                     self.dump_summary(tmpLog)
                     tmpLog.error("no candidates")
-                    retVal = retFatal
+                    retVal = retTmpError
                     continue
+
             ######################################
             # selection for status
             newScanSiteList = []
@@ -732,6 +728,13 @@ class AtlasAnalJobBroker(JobBrokerBase):
                     continue
             ######################################
             # selection for release
+            cmt_config = taskSpec.get_sw_platform()
+            is_regexp_cmt_config = False
+            if cmt_config:
+                if re.match(cmt_config, cmt_config) is None:
+                    is_regexp_cmt_config = True
+            base_platform = taskSpec.get_base_platform()
+            resolved_platforms = {}
             host_cpu_spec = taskSpec.get_host_cpu_spec()
             host_gpu_spec = taskSpec.get_host_gpu_spec()
             if not sitePreAssigned:
@@ -760,7 +763,7 @@ class AtlasAnalJobBroker(JobBrokerBase):
                         False,
                         container_name=taskSpec.container_name,
                         only_tags_fc=taskSpec.use_only_tags_fc(),
-                        host_cpu_spec=host_cpu_spec,
+                        host_cpu_specs=host_cpu_spec,
                         host_gpu_spec=host_gpu_spec,
                         log_stream=tmpLog,
                     )
@@ -788,7 +791,7 @@ class AtlasAnalJobBroker(JobBrokerBase):
                             False,
                             container_name=taskSpec.container_name,
                             only_tags_fc=taskSpec.use_only_tags_fc(),
-                            host_cpu_spec=host_cpu_spec,
+                            host_cpu_specs=host_cpu_spec,
                             host_gpu_spec=host_gpu_spec,
                             log_stream=tmpLog,
                         )
@@ -804,7 +807,7 @@ class AtlasAnalJobBroker(JobBrokerBase):
                             False,
                             container_name=taskSpec.container_name,
                             only_tags_fc=taskSpec.use_only_tags_fc(),
-                            host_cpu_spec=host_cpu_spec,
+                            host_cpu_specs=host_cpu_spec,
                             host_gpu_spec=host_gpu_spec,
                             log_stream=tmpLog,
                         )
@@ -825,7 +828,7 @@ class AtlasAnalJobBroker(JobBrokerBase):
                             False,
                             container_name=taskSpec.container_name,
                             only_tags_fc=taskSpec.use_only_tags_fc(),
-                            host_cpu_spec=host_cpu_spec,
+                            host_cpu_specs=host_cpu_spec,
                             host_gpu_spec=host_gpu_spec,
                             log_stream=tmpLog,
                         )
@@ -843,7 +846,7 @@ class AtlasAnalJobBroker(JobBrokerBase):
                             True,
                             container_name=taskSpec.container_name,
                             only_tags_fc=taskSpec.use_only_tags_fc(),
-                            host_cpu_spec=host_cpu_spec,
+                            host_cpu_specs=host_cpu_spec,
                             host_gpu_spec=host_gpu_spec,
                             log_stream=tmpLog,
                         )
@@ -854,9 +857,17 @@ class AtlasAnalJobBroker(JobBrokerBase):
                 sitesAny = []
                 for tmpSiteName in unified_site_list:
                     tmpSiteSpec = self.siteMapper.getSite(tmpSiteName)
+                    if cmt_config:
+                        platforms = AtlasBrokerUtils.resolve_cmt_config(tmpSiteName, cmt_config, base_platform, self.sw_map)
+                        if platforms:
+                            resolved_platforms[tmpSiteName] = platforms
                     if tmpSiteName in siteListWithSW:
                         # passed
-                        newScanSiteList.append(tmpSiteName)
+                        if not is_regexp_cmt_config or tmpSiteName in resolved_platforms:
+                            newScanSiteList.append(tmpSiteName)
+                        else:
+                            # cmtconfig is not resolved
+                            tmpLog.info(f"  skip site={tmpSiteName} due to unresolved regexp in cmtconfig={cmt_config} criteria=-regexpcmtconfig")
                     elif host_cpu_spec is None and host_gpu_spec is None and tmpSiteSpec.releases == ["ANY"]:
                         # release check is disabled or release is available
                         newScanSiteList.append(tmpSiteName)
@@ -864,15 +875,14 @@ class AtlasAnalJobBroker(JobBrokerBase):
                     else:
                         # release is unavailable
                         tmpLog.info(
-                            "  skip site=%s due to rel/cache %s:%s sw_platform=%s "
-                            " cpu=%s gpu=%s criteria=-cache"
-                            % (tmpSiteName, taskSpec.transUses, taskSpec.transHome, taskSpec.get_sw_platform(), str(host_cpu_spec), str(host_gpu_spec))
+                            f"  skip site={tmpSiteName} due to missing SW cache={taskSpec.transHome}:{taskSpec.get_sw_platform()} sw_platform='{taskSpec.container_name}' "
+                            f"or irrelevant HW cpu={str(host_cpu_spec)} gpu={str(host_gpu_spec)} criteria=-cache"
                         )
                 sitesAuto = self.get_pseudo_sites(sitesAuto, scanSiteList)
                 sitesAny = self.get_pseudo_sites(sitesAny, scanSiteList)
                 scanSiteList = self.get_pseudo_sites(newScanSiteList, scanSiteList)
-                tmpLog.info(f"{len(scanSiteList)} candidates ({len(sitesAuto)} with AUTO, {len(sitesAny)} with ANY) passed SW check ")
-                self.add_summary_message(oldScanSiteList, scanSiteList, "release/cache/CPU/GPU check")
+                tmpLog.info(f"{len(scanSiteList)} candidates ({len(sitesAuto)} with AUTO, {len(sitesAny)} with ANY) passed SW/HW check ")
+                self.add_summary_message(oldScanSiteList, scanSiteList, "SW/HW check")
                 if not scanSiteList:
                     self.dump_summary(tmpLog)
                     tmpLog.error("no candidates")
@@ -1562,8 +1572,8 @@ class AtlasAnalJobBroker(JobBrokerBase):
             nWorkers = 0
             nWorkersCutoff = 20
             if tmpSiteName in workerStat:
-                for tmpHarvesterID, tmpLabelStat in workerStat[tmpSiteName].items():
-                    for tmpHarvesterID, tmpResStat in tmpLabelStat.items():
+                for _, tmpLabelStat in workerStat[tmpSiteName].items():
+                    for _, tmpResStat in tmpLabelStat.items():
                         for tmpResType, tmpCounts in tmpResStat.items():
                             for tmpStatus, tmpNum in tmpCounts.items():
                                 if tmpStatus in ["running", "submitted"]:
@@ -1659,7 +1669,7 @@ class AtlasAnalJobBroker(JobBrokerBase):
                 # count subchunks
                 n_subchunks = 0
                 while True:
-                    subchunk = inputChunk.getSubChunk(
+                    subchunk, _ = inputChunk.getSubChunk(
                         None,
                         maxNumFiles=taskSpec.getMaxNumFilesPerJob(),
                         nFilesPerJob=taskSpec.getNumFilesPerJob(),
@@ -1929,6 +1939,10 @@ class AtlasAnalJobBroker(JobBrokerBase):
                 preSiteCandidateSpec = siteCandidateSpec
             # override attributes
             siteCandidateSpec.override_attribute("maxwdir", newMaxwdir.get(tmpSiteName))
+            if cmt_config:
+                platforms = resolved_platforms.get(tmpSiteName)
+                if platforms:
+                    siteCandidateSpec.override_attribute("platforms", platforms)
             # set weight
             siteCandidateSpec.weight = weight
             tmpStr = (

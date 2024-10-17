@@ -3,9 +3,10 @@ import smtplib
 import time
 import uuid
 
-from pandajedi.jedicore import Interaction
 from pandaserver.config import panda_config
 from pandaserver.taskbuffer import EventServiceUtils
+
+from pandajedi.jedicore import Interaction
 
 # port for SMTP server
 smtpPortList = [25, 587]
@@ -52,7 +53,7 @@ class PostProcessorBase(object):
 
     # refresh
     def refresh(self):
-        self.siteMapper = self.taskBufferIF.getSiteMapper()
+        self.siteMapper = self.taskBufferIF.get_site_mapper()
 
     # basic post procedure
     def doBasicPostProcess(self, taskSpec, tmpLog):
@@ -88,8 +89,10 @@ class PostProcessorBase(object):
             if datasetSpec.type in ["output", "log", "lib"]:
                 datasetSpec.nFiles = datasetSpec.nFilesFinished
             self.taskBufferIF.updateDataset_JEDI(datasetSpec, {"datasetID": datasetSpec.datasetID, "jediTaskID": datasetSpec.jediTaskID})
+        # trigger internal dataset cleanup
+        self.taskBufferIF.trigger_cleanup_internal_datasets(taskSpec.jediTaskID)
         # end time
-        taskSpec.endTime = datetime.datetime.utcnow()
+        taskSpec.endTime = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
         # update task
         self.taskBufferIF.updateTask_JEDI(taskSpec, {"jediTaskID": taskSpec.jediTaskID}, updateDEFT=True)
         # kill or kick child tasks
@@ -151,6 +154,8 @@ class PostProcessorBase(object):
         totalOkEvents = 0
         for datasetSpec in taskSpec.datasetSpecList:
             if datasetSpec.isMasterInput():
+                if datasetSpec.status == "removed":
+                    continue
                 nFiles += datasetSpec.nFiles
                 nFilesFinished += datasetSpec.nFilesFinished
                 try:

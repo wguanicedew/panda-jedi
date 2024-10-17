@@ -45,7 +45,7 @@ class ContentsFeeder(JediKnight):
         JediKnight.start(self)
         # go into main loop
         while True:
-            startTime = datetime.datetime.utcnow()
+            startTime = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
             try:
                 # loop over all vos
                 for vo in self.vos:
@@ -74,7 +74,7 @@ class ContentsFeeder(JediKnight):
                 logger.error(f"failed in {self.__class__.__name__}.start() with {errtype.__name__} {errvalue}")
             # sleep if needed
             loopCycle = jedi_config.confeeder.loopCycle
-            timeDelta = datetime.datetime.utcnow() - startTime
+            timeDelta = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - startTime
             sleepPeriod = loopCycle - timeDelta.seconds
             if sleepPeriod > 0:
                 time.sleep(sleepPeriod)
@@ -112,7 +112,7 @@ class ContentsFeederThread(WorkerThread):
                 logger.error(f"{self.__class__.__name__} failed in runImpl() with {str(e)}: {traceback.format_exc()}")
 
     # feed contents to tasks
-    def feed_contents_to_tasks(self, task_ds_list):
+    def feed_contents_to_tasks(self, task_ds_list, real_run=True):
         # max number of file records per dataset
         maxFileRecords = 200000
         # loop over all tasks
@@ -126,7 +126,7 @@ class ContentsFeederThread(WorkerThread):
             datasetsIdxConsistency = []
 
             # get task
-            tmpStat, taskSpec = self.taskBufferIF.getTaskWithID_JEDI(jediTaskID, False, True, self.pid, 10, clearError=True)
+            tmpStat, taskSpec = self.taskBufferIF.getTaskWithID_JEDI(jediTaskID, False, real_run, self.pid, 10, clearError=True)
             if not tmpStat or taskSpec is None:
                 self.logger.debug(f"failed to get taskSpec for jediTaskID={jediTaskID}")
                 continue
@@ -212,7 +212,7 @@ class ContentsFeederThread(WorkerThread):
                     # get dataset metadata
                     tmpLog.debug("get metadata")
                     gotMetadata = False
-                    stateUpdateTime = datetime.datetime.utcnow()
+                    stateUpdateTime = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
                     try:
                         if not datasetSpec.isPseudo():
                             tmpMetadata = ddmIF.getDatasetMetaData(datasetSpec.datasetName, ignore_missing=True)
@@ -300,15 +300,6 @@ class ContentsFeederThread(WorkerThread):
                                     longFormat = True
                                 tmpRet = ddmIF.getFilesInDataset(tmpDatasetName, getNumEvents=getNumEvents, skipDuplicate=skipDuplicate, longFormat=longFormat)
                                 tmpLog.debug(f"got {len(tmpRet)} files in {tmpDatasetName}")
-                                # remove lost files
-                                """
-                                tmpLostFiles = ddmIF.findLostFiles(tmpDatasetName,tmpRet)
-                                if tmpLostFiles != {}:
-                                    tmpLog.debug('found {0} lost files in {1}'.format(len(tmpLostFiles),tmpDatasetName))
-                                    for tmpListGUID,tmpLostLFN in tmpLostFiles.items():
-                                        tmpLog.debug('removed {0}'.format(tmpLostLFN))
-                                        del tmpRet[tmpListGUID]
-                                """
                             else:
                                 if datasetSpec.isSeqNumber():
                                     # make dummy files for seq_number
@@ -324,6 +315,10 @@ class ContentsFeederThread(WorkerThread):
                                             and taskParamMap["nEventsPerFile"] > taskParamMap["nEventsPerJob"]
                                         ):
                                             nPFN = nPFN * math.ceil(taskParamMap["nEventsPerFile"] / taskParamMap["nEventsPerJob"])
+                                        elif "nEventsPerJob" in taskParamMap and "nEventsPerFile" not in taskParamMap:
+                                            max_events_in_file = self.taskBufferIF.get_max_events_in_dataset(jediTaskID, datasetSpec.masterID)
+                                            if max_events_in_file and max_events_in_file > taskParamMap["nEventsPerJob"]:
+                                                nPFN = nPFN * math.ceil(max_events_in_file / taskParamMap["nEventsPerJob"])
                                     elif "nEvents" in taskParamMap and "nEventsPerJob" in taskParamMap:
                                         nPFN = math.ceil(taskParamMap["nEvents"] / taskParamMap["nEventsPerJob"])
                                     elif "nEvents" in taskParamMap and "nEventsPerFile" in taskParamMap and taskSpec.getNumFilesPerJob() is not None:
@@ -670,7 +665,7 @@ class ContentsFeederThread(WorkerThread):
                 tmpLog.debug(f"unlock task with {retUnlock}")
             # send message to job generator if new inputs are ready
             if not taskOnHold and not taskBroken and allUpdated and taskSpec.is_msg_driven():
-                push_ret = self.taskBufferIF.push_task_trigger_message("jedi_job_generator", jediTaskID)
+                push_ret = self.taskBufferIF.push_task_trigger_message("jedi_job_generator", jediTaskID, task_spec=taskSpec)
                 if push_ret:
                     tmpLog.debug("pushed trigger message to jedi_job_generator")
                 else:

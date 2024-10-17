@@ -2,24 +2,24 @@
 import sys
 
 from pandacommon.pandalogger.PandaLogger import PandaLogger
+
 from pandajedi.jedicore import Interaction
 from pandajedi.jedicore.JediTaskBufferInterface import JediTaskBufferInterface
 from pandajedi.jedicore.MsgWrapper import MsgWrapper
 from pandajedi.jedicore.ThreadUtils import ListWithLock, ThreadPool
 from pandajedi.jediddm.DDMInterface import DDMInterface
 from pandajedi.jediorder.JobBroker import JobBroker
-from pandajedi.jediorder.JobGenerator import JobGeneratorThread
+from pandajedi.jediorder.JobGenerator import JobGeneratorThread, logger
 from pandajedi.jediorder.JobSplitter import JobSplitter
 from pandajedi.jediorder.TaskSetupper import TaskSetupper
 
-logger = PandaLogger().getLogger("JobGenerator")
 tmpLog = MsgWrapper(logger)
 
 
 tbIF = JediTaskBufferInterface()
 tbIF.setupInterface()
 
-siteMapper = tbIF.getSiteMapper()
+siteMapper = tbIF.get_site_mapper()
 
 
 ddmIF = DDMInterface()
@@ -30,6 +30,10 @@ try:
     datasetID = [int(sys.argv[2])]
 except Exception:
     datasetID = None
+try:
+    n_files = int(sys.argv[3])
+except Exception:
+    n_files = 10
 
 s, taskSpec = tbIF.getTaskWithID_JEDI(jediTaskID)
 
@@ -54,7 +58,7 @@ tmpListList = tbIF.getTasksToBeProcessed_JEDI(
     workQueue,
     prodSourceLabel,
     cloudName,
-    nFiles=10,
+    nFiles=n_files,
     simTasks=[jediTaskID],
     fullSimulation=True,
     typicalNumFilesMap=typicalNumFilesMap,
@@ -66,6 +70,8 @@ tmpListList = tbIF.getTasksToBeProcessed_JEDI(
 taskSetupper = TaskSetupper(vo, prodSourceLabel)
 taskSetupper.initializeMods(tbIF, ddmIF)
 
+resource_types = tbIF.load_resource_types()
+
 for dummyID, tmpList in tmpListList:
     task_common = {}
     for taskSpec, cloudName, inputChunk in tmpList:
@@ -75,7 +81,10 @@ for dummyID, tmpList in tmpListList:
         jobBrokerCore.setTestMode()
         jobBrokerCore.set_task_common_dict(task_common)
         splitter = JobSplitter()
-        gen = JobGeneratorThread(None, threadPool, tbIF, ddmIF, siteMapper, False, taskSetupper, None, None, "dummy", None, None, brokerageLockIDs, False)
+        gen = JobGeneratorThread(
+            None, threadPool, tbIF, ddmIF, siteMapper, False, taskSetupper, None, None, "dummy", None, None, brokerageLockIDs, False, resource_types
+        )
+        gen.time_profile_level = 1
 
         taskParamMap = None
         if taskSpec.useLimitedSites():

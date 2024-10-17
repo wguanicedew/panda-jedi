@@ -1,12 +1,10 @@
 # DB API for JEDI
 
-import datetime
-
 # logger
 from pandacommon.pandalogger.PandaLogger import PandaLogger
-from pandajedi.jediconfig import jedi_config
-from pandaserver.brokerage.SiteMapper import SiteMapper
 from pandaserver.taskbuffer import TaskBuffer
+
+from pandajedi.jediconfig import jedi_config
 
 from . import JediDBProxyPool
 from .Interaction import CommandReceiveInterface
@@ -23,24 +21,12 @@ class JediTaskBuffer(TaskBuffer.TaskBuffer, CommandReceiveInterface):
         CommandReceiveInterface.__init__(self, conn)
         TaskBuffer.TaskBuffer.__init__(self)
         TaskBuffer.TaskBuffer.init(self, jedi_config.db.dbhost, jedi_config.db.dbpasswd, nDBConnection=nDBConnection)
-        # site mapper
-        self.siteMapper = SiteMapper(self)
-        # update time for site mapper
-        self.dateTimeForSM = datetime.datetime.utcnow()
         logger.debug("__init__")
 
     # query an SQL
     def querySQL(self, sql, varMap, arraySize=1000):
         with self.proxyPool.get() as proxy:
             return proxy.querySQLS(sql, varMap, arraySize)[1]
-
-    # get SiteMapper
-    def getSiteMapper(self):
-        timeNow = datetime.datetime.utcnow()
-        if datetime.datetime.utcnow() - self.dateTimeForSM > datetime.timedelta(minutes=10):
-            self.siteMapper = SiteMapper(self)
-            self.dateTimeForSM = timeNow
-        return self.siteMapper
 
     # get work queue map
     def getWorkQueueMap(self):
@@ -274,12 +260,22 @@ class JediTaskBuffer(TaskBuffer.TaskBuffer, CommandReceiveInterface):
         with self.proxyPool.get() as proxy:
             return proxy.getJobStatisticsWithWorkQueue_JEDI(vo, prodSourceLabel, minPriority)
 
+    # get core statistics with VO and prodSourceLabel
+    def get_core_statistics(self, vo, prod_source_label):
+        with self.proxyPool.get() as proxy:
+            return proxy.get_core_statistics(vo, prod_source_label)
+
     # get job statistics by global share
     def getJobStatisticsByGlobalShare(self, vo, exclude_rwq=False):
         with self.proxyPool.get() as proxy:
             return proxy.getJobStatisticsByGlobalShare(vo, exclude_rwq)
 
-    # get job statistics by global share
+    # get whether a gshare rtype combination is active
+    def get_active_gshare_rtypes(self, vo):
+        with self.proxyPool.get() as proxy:
+            return proxy.get_active_gshare_rtypes(vo)
+
+    # get job statistics by resource type
     def getJobStatisticsByResourceType(self, workqueue):
         with self.proxyPool.get() as proxy:
             return proxy.getJobStatisticsByResourceType(workqueue)
@@ -306,6 +302,8 @@ class JediTaskBuffer(TaskBuffer.TaskBuffer, CommandReceiveInterface):
         parallelOutMap=None,
         fileIDPool=[],
         n_files_per_chunk=1,
+        bulk_fetch_for_multiple_jobs=False,
+        master_dataset_id=None,
     ):
         with self.proxyPool.get() as proxy:
             return proxy.getOutputFiles_JEDI(
@@ -323,6 +321,8 @@ class JediTaskBuffer(TaskBuffer.TaskBuffer, CommandReceiveInterface):
                 parallelOutMap,
                 fileIDPool,
                 n_files_per_chunk,
+                bulk_fetch_for_multiple_jobs,
+                master_dataset_id,
             )
 
     # insert output file templates
@@ -430,12 +430,14 @@ class JediTaskBuffer(TaskBuffer.TaskBuffer, CommandReceiveInterface):
     # set tasks to be assigned
     def setScoutJobDataToTasks_JEDI(self, vo, prodSourceLabel):
         with self.proxyPool.get() as proxy:
-            return proxy.setScoutJobDataToTasks_JEDI(vo, prodSourceLabel, self.siteMapper)
+            tmp_site_mapper = self.get_site_mapper()
+            return proxy.setScoutJobDataToTasks_JEDI(vo, prodSourceLabel, tmp_site_mapper)
 
     # prepare tasks to be finished
     def prepareTasksToBeFinished_JEDI(self, vo, prodSourceLabel, nTasks=50, simTasks=None, pid="lock", noBroken=False):
         with self.proxyPool.get() as proxy:
-            return proxy.prepareTasksToBeFinished_JEDI(vo, prodSourceLabel, nTasks, simTasks, pid, noBroken, self.siteMapper)
+            tmp_site_mapper = self.get_site_mapper()
+            return proxy.prepareTasksToBeFinished_JEDI(vo, prodSourceLabel, nTasks, simTasks, pid, noBroken, tmp_site_mapper)
 
     # get tasks to be assigned
     def getTasksToAssign_JEDI(self, vo, prodSourceLabel, workQueue, resource_name):
@@ -543,9 +545,9 @@ class JediTaskBuffer(TaskBuffer.TaskBuffer, CommandReceiveInterface):
             return proxy.getSitesUsedByTask_JEDI(jediTaskID)
 
     # get random seed
-    def getRandomSeed_JEDI(self, jediTaskID, simul):
+    def getRandomSeed_JEDI(self, jediTaskID, simul, n_files=1):
         with self.proxyPool.get() as proxy:
-            return proxy.getRandomSeed_JEDI(jediTaskID, simul)
+            return proxy.getRandomSeed_JEDI(jediTaskID, simul, n_files)
 
     # get preprocess metadata
     def getPreprocessMetadata_JEDI(self, jediTaskID):
@@ -565,10 +567,16 @@ class JediTaskBuffer(TaskBuffer.TaskBuffer, CommandReceiveInterface):
             return tmpStat, tmpJobID
 
     # retry or incrementally execute a task
-    def retryTask_JEDI(self, jediTaskID, commStr, maxAttempt=5, retryChildTasks=True, discardEvents=False, release_unstaged=False):
+    def retryTask_JEDI(self, jediTaskID, commStr, maxAttempt=5, retryChildTasks=True, discardEvents=False, release_unstaged=False, keep_share_priority=False):
         with self.proxyPool.get() as proxy:
             return proxy.retryTask_JEDI(
-                jediTaskID, commStr, maxAttempt, retryChildTasks=retryChildTasks, discardEvents=discardEvents, release_unstaged=release_unstaged
+                jediTaskID,
+                commStr,
+                maxAttempt,
+                retryChildTasks=retryChildTasks,
+                discardEvents=discardEvents,
+                release_unstaged=release_unstaged,
+                keep_share_priority=keep_share_priority,
             )
 
     # append input datasets for incremental execution
@@ -931,9 +939,9 @@ class JediTaskBuffer(TaskBuffer.TaskBuffer, CommandReceiveInterface):
             return proxy.get_origin_datasets(jedi_task_id, dataset_name, lfns)
 
     # push message to message processors which triggers functions of agents
-    def push_task_trigger_message(self, msg_type, jedi_task_id, data_dict=None, priority=None):
+    def push_task_trigger_message(self, msg_type, jedi_task_id, data_dict=None, priority=None, task_spec=None):
         with self.proxyPool.get() as proxy:
-            return proxy.push_task_trigger_message(msg_type, jedi_task_id, data_dict, priority)
+            return proxy.push_task_trigger_message(msg_type, jedi_task_id, data_dict, priority, task_spec)
 
     # aggregate carbon footprint of a task
     def get_task_carbon_footprint(self, jedi_task_id, level="global"):
@@ -944,3 +952,8 @@ class JediTaskBuffer(TaskBuffer.TaskBuffer, CommandReceiveInterface):
     def get_pending_dc_tasks_JEDI(self, task_type="prod", time_limit_minutes=60):
         with self.proxyPool.get() as proxy:
             return proxy.get_pending_dc_tasks_JEDI(task_type=task_type, time_limit_minutes=time_limit_minutes)
+
+    # get max number of events in a file of the dataset
+    def get_max_events_in_dataset(self, jedi_task_id, dataset_id):
+        with self.proxyPool.get() as proxy:
+            return proxy.get_max_events_in_dataset(jedi_task_id, dataset_id)

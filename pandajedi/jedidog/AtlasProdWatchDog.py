@@ -4,12 +4,13 @@ import sys
 import traceback
 
 from pandacommon.pandalogger.PandaLogger import PandaLogger
+from pandaserver.dataservice import DataServiceUtils
+from pandaserver.taskbuffer import JobUtils
+
 from pandajedi.jedibrokerage import AtlasBrokerUtils
 from pandajedi.jediconfig import jedi_config
 from pandajedi.jedicore import JediCoreUtils
 from pandajedi.jedicore.MsgWrapper import MsgWrapper
-from pandaserver.dataservice import DataServiceUtils
-from pandaserver.taskbuffer import JobUtils
 
 from .JumboWatchDog import JumboWatchDog
 from .TypicalWatchDogBase import TypicalWatchDogBase
@@ -160,7 +161,7 @@ class AtlasProdWatchDog(TypicalWatchDogBase):
         # get DDM I/F
         ddmIF = self.ddmIF.getInterface(self.vo)
         # get site mapper
-        siteMapper = self.taskBufferIF.getSiteMapper()
+        siteMapper = self.taskBufferIF.get_site_mapper()
         # get tasks to get reassigned
         taskList = self.taskBufferIF.getTasksToReassign_JEDI(self.vo, self.prodSourceLabel)
 
@@ -175,42 +176,28 @@ class AtlasProdWatchDog(TypicalWatchDogBase):
             if tmpStat is not True:
                 tmpLog.error("failed to get datasets")
                 continue
-            # update DB
-            if not taskSpec.useWorldCloud():
-                # update cloudtasks
-                tmpStat = self.taskBufferIF.setCloudTaskByUser("jedi", taskSpec.jediTaskID, taskSpec.cloud, "assigned", True)
-                if tmpStat != "SUCCEEDED":
-                    tmpLog.error("failed to update CloudTasks")
-                    continue
-                # check cloud
-                if not siteMapper.checkCloud(taskSpec.cloud):
-                    tmpLog.error(f"cloud={taskSpec.cloud} doesn't exist")
-                    continue
-            else:
-                # re-run task brokerage
-                if taskSpec.nucleus in [None, ""]:
-                    taskSpec.status = "assigning"
-                    taskSpec.oldStatus = None
-                    taskSpec.setToRegisterDatasets()
-                    self.taskBufferIF.updateTask_JEDI(taskSpec, {"jediTaskID": taskSpec.jediTaskID}, setOldModTime=True)
-                    tmpLog.debug(f"#ATM #KV label=managed action=trigger_new_brokerage by setting task_status={taskSpec.status}")
-                    continue
 
-                # get nucleus
-                nucleusSpec = siteMapper.getNucleus(taskSpec.nucleus)
-                if nucleusSpec is None:
-                    tmpLog.error(f"nucleus={taskSpec.nucleus} doesn't exist")
-                    continue
+            # re-run task brokerage
+            if taskSpec.nucleus in [None, ""]:
+                taskSpec.status = "assigning"
+                taskSpec.oldStatus = None
+                taskSpec.setToRegisterDatasets()
+                self.taskBufferIF.updateTask_JEDI(taskSpec, {"jediTaskID": taskSpec.jediTaskID}, setOldModTime=True)
+                tmpLog.debug(f"#ATM #KV label=managed action=trigger_new_brokerage by setting task_status={taskSpec.status}")
+                continue
 
-                # set nucleus
-                retMap = {taskSpec.jediTaskID: AtlasBrokerUtils.getDictToSetNucleus(nucleusSpec, datasetSpecList)}
-                tmpRet = self.taskBufferIF.setCloudToTasks_JEDI(retMap)
+            # get nucleus
+            nucleusSpec = siteMapper.getNucleus(taskSpec.nucleus)
+            if nucleusSpec is None:
+                tmpLog.error(f"nucleus={taskSpec.nucleus} doesn't exist")
+                continue
 
-            # get T1/nucleus
-            if not taskSpec.useWorldCloud():
-                t1SiteName = siteMapper.getCloud(taskSpec.cloud)["dest"]
-            else:
-                t1SiteName = nucleusSpec.getOnePandaSite()
+            # set nucleus
+            retMap = {taskSpec.jediTaskID: AtlasBrokerUtils.getDictToSetNucleus(nucleusSpec, datasetSpecList)}
+            self.taskBufferIF.setCloudToTasks_JEDI(retMap)
+
+            # get nucleus
+            t1SiteName = nucleusSpec.getOnePandaSite()
             t1Site = siteMapper.getSite(t1SiteName)
 
             # loop over all datasets
@@ -267,7 +254,7 @@ class AtlasProdWatchDog(TypicalWatchDogBase):
         if timeoutForPending is None:
             timeoutForPending = jedi_config.watchdog.timeoutForPending
         timeoutForPending = int(timeoutForPending) * 24
-        tmpRet = self.taskBufferIF.reactivatePendingTasks_JEDI(self.vo, self.prodSourceLabel, timeoutVal, timeoutForPending, minPriority=minPriority)
+        tmpRet, _ = self.taskBufferIF.reactivatePendingTasks_JEDI(self.vo, self.prodSourceLabel, timeoutVal, timeoutForPending, minPriority=minPriority)
         if tmpRet is None:
             # failed
             gTmpLog.error(f"failed to reactivate high priority (>{minPriority}) tasks")
@@ -320,6 +307,7 @@ class AtlasProdWatchDog(TypicalWatchDogBase):
             # empty
             gTmpLog.debug("no pending DC task; skipped")
         else:
+            gTmpLog.debug(f"got {len(res_dict)} DC tasks to provoke")
             ddm_if = self.ddmIF.getInterface(self.vo)
             # loop over pending DC tasks
             for task_id, ds_name_list in res_dict.items():
@@ -327,24 +315,18 @@ class AtlasProdWatchDog(TypicalWatchDogBase):
                     continue
                 total_all_ok = True
                 for ds_name in ds_name_list:
-                    # ret_code, (all_ok, rule_dict) = ddm_if.get_rules_state(ds_name)
-                    ret_code, ret_data = ddm_if.get_rules_state(ds_name)
+                    ret_data = ddm_if.get_rules_state(ds_name)
                     try:
                         all_ok, rule_dict = ret_data
                         total_all_ok = total_all_ok and all_ok
                     except ValueError:
-                        gTmpLog.error(f"failed to thottle jobs in paused tasks, {ret_data}")
+                        gTmpLog.error(f"failed to get rule info for task={task_id}. data={ret_data}")
                         total_all_ok = False
                         break
                 if total_all_ok:
-                    if False:
-                        # Dry-run; all rules ok; provoke the task
-                        gTmpLog.info(f"provoking task {task_id} (dry-run)")
-                        gTmpLog.info(f"all staging rules of task {task_id} are OK; provoked (dry-run)")
-                    else:
-                        # all rules ok; provoke the task
-                        gTmpLog.info(f"provoking task {task_id}")
-                        self.taskBufferIF.updateInputDatasetsStagedAboutIdds_JEDI(task_id, None, None)
-                        gTmpLog.info(f"all staging rules of task {task_id} are OK; provoked")
+                    # all rules ok; provoke the task
+                    gTmpLog.info(f"provoking task {task_id}")
+                    self.taskBufferIF.updateInputDatasetsStagedAboutIdds_JEDI(task_id, None, None)
+                    gTmpLog.info(f"all staging rules of task {task_id} are OK; provoked")
                 else:
                     gTmpLog.debug(f"not all staging rules of task {task_id} are OK; skipped ")

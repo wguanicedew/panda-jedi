@@ -31,7 +31,7 @@ class JobBrokerBase(object):
         self.task_common[attr_name] = attr_value
 
     def refresh(self):
-        self.siteMapper = self.taskBufferIF.getSiteMapper()
+        self.siteMapper = self.taskBufferIF.get_site_mapper()
 
     def setLiveCounter(self, liveCounter):
         self.liveCounter = liveCounter
@@ -49,17 +49,6 @@ class JobBrokerBase(object):
         if self.useLock:
             return self.baseLockID
         return None
-
-    def releaseSiteLock(self, vo, prodSourceLabel, queue_id):
-        # FIXME: releaseSiteLock method is unused elswhere
-        if self.useLock:
-            self.taskBufferIF.unlockProcessWithPID_JEDI(vo, prodSourceLabel, queue_id, self.lockID, False)
-
-    def lockSite(self, vo, prodSourceLabel, siteName, queue_id):
-        if not self.useLock:
-            self.useLock = True
-        # FIXME: lockSite method is unused elswhere; lockProcess_JEDI arguments have changed and incompatible with the following line
-        # self.taskBufferIF.lockProcess_JEDI(vo, prodSourceLabel, siteName, queue_id, self.lockID, True)
 
     def checkSiteLock(self, vo, prodSourceLabel, siteName, queue_id, resource_name):
         return self.taskBufferIF.checkProcessLock_JEDI(

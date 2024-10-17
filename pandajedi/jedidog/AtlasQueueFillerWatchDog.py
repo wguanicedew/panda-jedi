@@ -2,21 +2,18 @@ import copy
 import datetime
 import json
 import os
-import re
 import socket
 import sys
 import time
 import traceback
 
-# logger
 from pandacommon.pandalogger.PandaLogger import PandaLogger
+from pandaserver.dataservice import DataServiceUtils
+from pandaserver.taskbuffer.ResourceSpec import ResourceSpecMapper
+
 from pandajedi.jedibrokerage import AtlasBrokerUtils
 from pandajedi.jediconfig import jedi_config
-from pandajedi.jedicore import Interaction
 from pandajedi.jedicore.MsgWrapper import MsgWrapper
-from pandajedi.jedicore.ThreadUtils import ListWithLock
-from pandaserver.dataservice import DataServiceUtils
-from pandaserver.taskbuffer import JobUtils
 
 from .WatchDogBase import WatchDogBase
 
@@ -39,16 +36,20 @@ class AtlasQueueFillerWatchDog(WatchDogBase):
     def __init__(self, taskBufferIF, ddmIF):
         WatchDogBase.__init__(self, taskBufferIF, ddmIF)
         self.pid = f"{socket.getfqdn().split('.')[0]}-{os.getpid()}-dog"
-        # self.cronActions = {'forPrestage': 'atlas_prs'}
         self.vo = "atlas"
         self.prodSourceLabelList = ["managed"]
+
         # keys for cache
         self.dc_main_key = "AtlasQueueFillerWatchDog"
         self.dc_sub_key_pt = "PreassignedTasks"
         self.dc_sub_key_bt = "BlacklistedTasks"
         self.dc_sub_key_attr = "OriginalTaskAttributes"
         self.dc_sub_key_ses = "SiteEmptySince"
-        # call refresh
+
+        # initialize the resource_spec_mapper object
+        resource_types = taskBufferIF.load_resource_types()
+        self.resource_spec_mapper = ResourceSpecMapper(resource_types)
+
         self.refresh()
 
     # refresh information stored in the instance
@@ -56,7 +57,7 @@ class AtlasQueueFillerWatchDog(WatchDogBase):
         # work queue mapper
         self.workQueueMapper = self.taskBufferIF.getWorkQueueMap()
         # site mapper
-        self.siteMapper = self.taskBufferIF.getSiteMapper()
+        self.siteMapper = self.taskBufferIF.get_site_mapper()
         # all sites
         allSiteList = []
         for siteName, tmpSiteSpec in self.siteMapper.siteSpecList.items():
@@ -131,18 +132,6 @@ class AtlasQueueFillerWatchDog(WatchDogBase):
             component="AtlasQueueFillerWatchDog.preassign",
             pid=self.pid,
             timeLimit=5,
-        )
-
-    # release lock
-    def _release_lock(self):
-        return self.taskBufferIF.unlockProcess_JEDI(
-            vo=self.vo,
-            prodSourceLabel="managed",
-            cloud=None,
-            workqueue_id=None,
-            resource_name=None,
-            component="AtlasQueueFillerWatchDog.preassign",
-            pid=self.pid,
         )
 
     # get map of site to list of RSEs
@@ -297,7 +286,7 @@ class AtlasQueueFillerWatchDog(WatchDogBase):
         self.refresh()
         # list of resource type
         resource_type_list = [rt.resource_name for rt in self.taskBufferIF.load_resource_types()]
-        # threshold of time duration in second that the queue keeps empty to trigger preassignment
+        # threshold of time duration in second that the queue keeps empty to trigger preassigning
         empty_duration_threshold = 1800
         # return map
         ret_map = {
@@ -322,7 +311,7 @@ class AtlasQueueFillerWatchDog(WatchDogBase):
             # available sites
             available_sites_list = self.get_available_sites_list()
             # now timestamp
-            now_time = datetime.datetime.utcnow()
+            now_time = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
             now_time_ts = int(now_time.timestamp())
             # update site empty-since map
             site_empty_since_map = copy.deepcopy(site_empty_since_map_orig)
@@ -336,7 +325,7 @@ class AtlasQueueFillerWatchDog(WatchDogBase):
                 if site not in site_empty_since_map_orig:
                     site_empty_since_map[site] = now_time_ts
             self._update_to_ses_cache(site_empty_since_map)
-            # evaluate sites to preaassign according to cache
+            # evaluate sites to preassign according to cache
             # get blacklisted_tasks_map from cache
             blacklisted_tasks_map = self._get_from_bt_cache()
             blacklisted_tasks_set = set()
@@ -360,11 +349,11 @@ class AtlasQueueFillerWatchDog(WatchDogBase):
                     tmp_log.debug(f"skipped {site} since no available RSE")
                     continue
                 # skip if no coreCount set
-                if not tmpSiteSpec.coreCount or not tmpSiteSpec.coreCount > 0:
+                if not tmpSiteSpec.coreCount or tmpSiteSpec.coreCount <= 0:
                     tmp_log.debug(f"skipped {site} since coreCount is not set")
                     continue
                 # now timestamp
-                now_time = datetime.datetime.utcnow()
+                now_time = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
                 now_time_ts = int(now_time.timestamp())
                 # skip if not empty for long enough
                 if site not in site_empty_since_map:
@@ -426,12 +415,15 @@ class AtlasQueueFillerWatchDog(WatchDogBase):
                 for resource_type in resource_type_list:
                     # key name for preassigned_tasks_map = site + resource_type
                     key_name = f"{site}|{resource_type}"
-                    # skip if not match with site capability
-                    if site_capability == "score" and not resource_type.startswith("SCORE"):
+
+                    # skip if no match: site is single core and resource_type is multi core
+                    if site_capability == "score" and self.resource_spec_mapper.is_multi_core(resource_type):
                         continue
-                    elif site_capability == "mcore" and not resource_type.startswith("MCORE"):
+
+                    # skip if no match: site is multi core and resource_type is single core
+                    elif site_capability == "mcore" and self.resource_spec_mapper.is_single_core(resource_type):
                         continue
-                    # params map
+
                     params_map = {
                         ":prodSourceLabel": prod_source_label,
                         ":resource_type": resource_type,
@@ -448,7 +440,7 @@ class AtlasQueueFillerWatchDog(WatchDogBase):
                     task_orig_attr_map = self._get_from_attr_cache()
                     # number of tasks already preassigned
                     n_preassigned_tasks = len(preassigned_tasks_cached)
-                    # nuber of tasks to preassign
+                    # number of tasks to preassign
                     n_tasks_to_preassign = max(max_preassigned_tasks - n_preassigned_tasks, 0)
                     # preassign
                     if n_tasks_to_preassign <= 0:
@@ -531,7 +523,7 @@ class AtlasQueueFillerWatchDog(WatchDogBase):
         self.refresh()
         # busy sites
         busy_sites_dict = self.get_busy_sites()
-        # loop to undo preassignment
+        # loop to undo preassigning
         for prod_source_label in self.prodSourceLabelList:
             # parameter from GDP config
             max_preassigned_tasks = self.taskBufferIF.getConfigValue("queue_filler", f"MAX_PREASSIGNED_TASKS_{prod_source_label}", "jedi", self.vo)
@@ -547,7 +539,7 @@ class AtlasQueueFillerWatchDog(WatchDogBase):
             blacklist_duration_hours = 12
             blacklisted_tasks_map_orig = self._get_from_bt_cache()
             blacklisted_tasks_map = copy.deepcopy(blacklisted_tasks_map_orig)
-            now_time = datetime.datetime.utcnow()
+            now_time = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
             min_allowed_time = now_time - datetime.timedelta(hours=blacklist_duration_hours)
             min_allowed_ts = int(min_allowed_time.timestamp())
             for ts_str in blacklisted_tasks_map_orig:
@@ -564,12 +556,12 @@ class AtlasQueueFillerWatchDog(WatchDogBase):
             # clean up task_orig_attr_map in cache
             task_orig_attr_map_orig = self._get_from_attr_cache()
             task_orig_attr_map = copy.deepcopy(task_orig_attr_map_orig)
-            all_preassiged_taskids = set()
+            all_preassigned_taskids = set()
             for taskid_list in preassigned_tasks_map_orig.values():
-                all_preassiged_taskids |= set(taskid_list)
+                all_preassigned_taskids |= set(taskid_list)
             for taskid_str in task_orig_attr_map_orig:
                 taskid = int(taskid_str)
-                if taskid not in all_preassiged_taskids:
+                if taskid not in all_preassigned_taskids:
                     del task_orig_attr_map[taskid_str]
             self._update_to_attr_cache(task_orig_attr_map)
             # loop on preassigned tasks in cache
@@ -644,7 +636,7 @@ class AtlasQueueFillerWatchDog(WatchDogBase):
                             # Kibana log
                             for taskid in updated_tasks:
                                 tmp_log.debug(
-                                    f"#ATM #KV jediTaskID={taskid} action=undo_preassign site={site} rtype={resource_type} un-preassinged since {reason_str}"
+                                    f"#ATM #KV jediTaskID={taskid} action=undo_preassign site={site} rtype={resource_type} un-preassigned since {reason_str}"
                                 )
                 # update preassigned_tasks_map into cache
                 if had_undo:
@@ -661,7 +653,7 @@ class AtlasQueueFillerWatchDog(WatchDogBase):
                 if had_undo and not force_undo:
                     blacklisted_tasks_map_orig = self._get_from_bt_cache()
                     blacklisted_tasks_map = copy.deepcopy(blacklisted_tasks_map_orig)
-                    now_time = datetime.datetime.utcnow()
+                    now_time = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
                     now_rounded_ts = int(now_time.replace(minute=0, second=0, microsecond=0).timestamp())
                     ts_str = str(now_rounded_ts)
                     if ts_str in blacklisted_tasks_map_orig:
@@ -702,9 +694,6 @@ class AtlasQueueFillerWatchDog(WatchDogBase):
             self.undo_preassign()
             # preassign tasks to sites
             ret_map = self.do_preassign()
-            # unlock
-            # self._release_lock()
-            # origTmpLog.debug('released lock')
             # to-reassign map
             to_reassign_map = ret_map["to_reassign"]
             if to_reassign_map:

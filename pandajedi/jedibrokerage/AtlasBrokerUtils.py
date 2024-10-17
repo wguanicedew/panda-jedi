@@ -8,145 +8,10 @@ import time
 import traceback
 
 from dataservice.DataServiceUtils import select_scope
-from pandajedi.jedicore import Interaction
 from pandaserver.dataservice import DataServiceUtils
 from pandaserver.taskbuffer import JobUtils, ProcessGroups
 
-
-# get hospital queues
-def getHospitalQueues(siteMapper, prodSourceLabel, job_label, siteInNucleus=None, cloudForNucleus=None):
-    retMap = {}
-    # hospital words
-    goodWordList = ["CORE$", "VL$", "MEM$", "MP\d+$", "LONG$", "_HIMEM", "_\d+$", "SHORT$"]
-    # loop over all clouds
-    if siteInNucleus is None:
-        cloudList = siteMapper.getCloudList()
-    else:
-        # WORLD
-        cloudList = [cloudForNucleus]
-    for tmpCloudName in cloudList:
-        # get cloud
-        tmpCloudSpec = siteMapper.getCloud(tmpCloudName)
-        if siteInNucleus is None:
-            # get T1
-            tmpT1Name = tmpCloudSpec["source"]
-        else:
-            tmpT1Name = siteInNucleus
-        tmpT1Spec = siteMapper.getSite(tmpT1Name)
-        scope_t1_input, scope_t1_output = select_scope(tmpT1Spec, prodSourceLabel, job_label)
-        # skip if DDM is undefined
-        if not tmpT1Spec.ddm_output[scope_t1_output]:
-            continue
-        # loop over all sites
-        for tmpSiteName in tmpCloudSpec["sites"]:
-            # skip T1 defined in cloudconfig
-            if tmpSiteName == tmpT1Name:
-                continue
-            # check hospital words
-            checkHospWord = False
-            for tmpGoodWord in goodWordList:
-                if re.search(tmpGoodWord, tmpSiteName) is not None:
-                    checkHospWord = True
-                    break
-            if not checkHospWord:
-                continue
-            # check site
-            if not siteMapper.checkSite(tmpSiteName):
-                continue
-            tmpSiteSpec = siteMapper.getSite(tmpSiteName)
-            scope_tmpSite_input, scope_tmpSite_output = select_scope(tmpSiteSpec, prodSourceLabel, job_label)
-            # check DDM
-            if (
-                scope_t1_output in tmpT1Spec.ddm_output
-                and scope_tmpSite_output in tmpSiteSpec.ddm_output
-                and tmpT1Spec.ddm_output[scope_t1_output] == tmpSiteSpec.ddm_output[scope_tmpSite_output]
-            ):
-                # append
-                if tmpCloudName not in retMap:
-                    retMap[tmpCloudName] = []
-                if tmpSiteName not in retMap[tmpCloudName]:
-                    retMap[tmpCloudName].append(tmpSiteName)
-    # return
-    return retMap
-
-
-# get sites where data is available
-def getSitesWithData(siteMapper, ddmIF, datasetName, prodsourcelabel, job_label, storageToken=None):
-    # get num of files
-    try:
-        if not datasetName.endswith("/"):
-            totalNumDatasets = 1
-        else:
-            tmpDsMap = ddmIF.listDatasetsInContainer(datasetName)
-            totalNumDatasets = len(tmpDsMap)
-    except Exception:
-        errtype, errvalue = sys.exc_info()[:2]
-        return errtype, f"ddmIF.listDatasetsInContainer failed with {errvalue}"
-    # get replicas
-    try:
-        replicaMap = {}
-        replicaMap[datasetName] = ddmIF.listDatasetReplicas(datasetName)
-    except Exception:
-        errtype, errvalue = sys.exc_info()[:2]
-        return errtype, f"ddmIF.listDatasetReplicas failed with {errvalue}"
-    # loop over all clouds
-    retMap = {}
-    for tmpCloudName in siteMapper.cloudSpec.keys():
-        retMap[tmpCloudName] = {"t1": {}, "t2": []}
-        # get T1 DDM endpoints
-        tmpCloudSpec = siteMapper.getCloud(tmpCloudName)
-        # FIXME until CERN-PROD_TZERO is added to cloudconfig.tier1SE
-        if tmpCloudName == "CERN":
-            if "CERN-PROD_TZERO" not in tmpCloudSpec["tier1SE"]:
-                tmpCloudSpec["tier1SE"].append("CERN-PROD_TZERO")
-        for tmpSePat in tmpCloudSpec["tier1SE"]:
-            if "*" in tmpSePat:
-                tmpSePat = tmpSePat.replace("*", ".*")
-            tmpSePat = "^" + tmpSePat + "$"
-            for tmpSE in replicaMap[datasetName].keys():
-                # check name with regexp pattern
-                if re.search(tmpSePat, tmpSE) is None:
-                    continue
-                # check space token
-                if storageToken not in ["", None, "NULL"]:
-                    seStr = ddmIF.getSiteProperty(tmpSE, "se")
-                    try:
-                        if seStr.split(":")[1] != storageToken:
-                            continue
-                    except Exception:
-                        pass
-                # check archived metadata
-                # FIXME
-                pass
-                # check tape attribute
-                try:
-                    tmpOnTape = ddmIF.getSiteProperty(tmpSE, "is_tape")
-                except Exception:
-                    continue
-                    # errtype,errvalue = sys.exc_info()[:2]
-                    # return errtype,'ddmIF.getSiteProperty for %s:tape failed with %s' % (tmpSE,errvalue)
-                # check completeness
-                tmpStatistics = replicaMap[datasetName][tmpSE][-1]
-                if tmpStatistics["found"] is None:
-                    tmpDatasetStatus = "unknown"
-                    pass
-                elif tmpStatistics["total"] == tmpStatistics["found"] and tmpStatistics["total"] >= totalNumDatasets:
-                    tmpDatasetStatus = "complete"
-                else:
-                    tmpDatasetStatus = "incomplete"
-                # append
-                retMap[tmpCloudName]["t1"][tmpSE] = {"tape": tmpOnTape, "state": tmpDatasetStatus}
-        # get T2 list
-        tmpSiteList = DataServiceUtils.getSitesWithDataset(
-            datasetName, siteMapper, replicaMap, tmpCloudName, prodsourcelabel, job_label, useHomeCloud=True, useOnlineSite=True, includeT1=False
-        )
-        # append
-        retMap[tmpCloudName]["t2"] = tmpSiteList
-        # remove if empty
-        if len(retMap[tmpCloudName]["t1"]) == 0 and len(retMap[tmpCloudName]["t2"]) == 0:
-            del retMap[tmpCloudName]
-    # return
-    return Interaction.SC_SUCCEEDED, retMap
+from pandajedi.jedicore import Interaction
 
 
 # get nuclei where data is available
@@ -223,15 +88,45 @@ def getNucleiWithData(siteMapper, ddmIF, datasetName, candidateNuclei, deepScan=
     return Interaction.SC_SUCCEEDED, retMap
 
 
-# get analysis sites where data is available
-def getAnalSitesWithData(siteList, siteMapper, ddmIF, datasetName, element_list):
+# get sites where data is available and check if complete replica is available at online RSE
+def get_sites_with_data(siteList, siteMapper, ddmIF, datasetName, element_list, max_missing_input_files, min_input_completeness):
     # get replicas
     try:
         replicaMap = {}
         replicaMap[datasetName] = ddmIF.listDatasetReplicas(datasetName, use_vp=True, skip_incomplete_element=True, element_list=element_list)
     except Exception:
         errtype, errvalue = sys.exc_info()[:2]
-        return errtype, f"ddmIF.listDatasetReplicas failed with {errvalue}"
+        return errtype, f"ddmIF.listDatasetReplicas failed with {errvalue}", None, None
+
+    # check if complete replica is available at online RSE
+    complete_disk = False
+    complete_tape = False
+    bad_rse_list = set(ddmIF.get_bad_endpoint_read())
+    for tmp_rse, tmp_data_list in replicaMap[datasetName].items():
+        # blacklisted
+        if tmp_rse in bad_rse_list:
+            continue
+        # look for complete replicas
+        for tmp_data in tmp_data_list:
+            if not tmp_data.get("vp"):
+                if tmp_data["found"] == tmp_data["total"]:
+                    pass
+                elif (
+                    tmp_data["total"]
+                    and tmp_data["found"]
+                    and (
+                        tmp_data["total"] - tmp_data["found"] <= max_missing_input_files
+                        or tmp_data["found"] / tmp_data["total"] * 100 >= min_input_completeness
+                    )
+                ):
+                    pass
+                else:
+                    continue
+                if tmp_data.get("is_tape") == "Y":
+                    complete_tape = True
+                else:
+                    complete_disk = True
+
     # loop over all clouds
     retMap = {}
     for tmpSiteName in siteList:
@@ -301,7 +196,7 @@ def getAnalSitesWithData(siteList, siteMapper, ddmIF, datasetName, element_list)
                 if "vp" in tmpStatistics:
                     retMap[tmpSiteName][tmpSE]["vp"] = tmpStatistics["vp"]
     # return
-    return Interaction.SC_SUCCEEDED, retMap
+    return Interaction.SC_SUCCEEDED, retMap, complete_disk, complete_tape
 
 
 # get analysis sites where data is available at disk
@@ -361,10 +256,13 @@ def getNumJobs(jobStatMap, computingSite, jobStatus, cloud=None, workQueue_tag=N
     return nJobs
 
 
-# get the total number of jobs in a status
 def get_total_nq_nr_ratio(job_stat_map, work_queue_tag=None):
+    """
+    Get the ratio of number of queued jobs to number of running jobs
+    """
     nRunning = 0
     nQueue = 0
+
     # loop over all workQueues
     for siteVal in job_stat_map.values():
         for tmpWorkQueue in siteVal:
@@ -382,92 +280,113 @@ def get_total_nq_nr_ratio(job_stat_map, work_queue_tag=None):
         ratio = float(nQueue) / float(nRunning)
     except Exception:
         ratio = None
-    # return
+
     return ratio
 
 
-# check if the queue is suppressed
-def hasZeroShare(siteSpec, taskSpec, ignorePrio, tmpLog):
-    # per-site share is undefined
-    if siteSpec.fairsharePolicy in ["", None]:
+def hasZeroShare(site_spec, task_spec, ignore_priority, tmp_log):
+    """
+    Check if the site has a zero share for the given task. Zero share means there is a policy preventing the site to be used for the task.
+
+    :param site_spec: SiteSpec object describing the site being checked in brokerage
+    :param task_spec: TaskSpec object describing the task being brokered
+    :param ignore_priority: Merging job chunks will skip the priority check
+    :param tmp_log: Logger object
+
+    :return: False means there is no policy defined and the site can be used.
+             True means the site has a fair share policy that prevents the site to be used for the task
+    """
+
+    # there is no per-site share defined (CRIC "fairsharePolicy" field), the site can be used
+    if site_spec.fairsharePolicy in ["", None]:
         return False
+
     try:
-        # get process group
-        tmpProGroup = ProcessGroups.getProcessGroup(taskSpec.processingType)
-        # no suppress for test queues
-        if tmpProGroup in ["test"]:
+        # get the group of processing types from a pre-defined mapping
+        processing_group = ProcessGroups.getProcessGroup(task_spec.processingType)
+
+        # don't suppress test tasks - the site can be used
+        if processing_group in ["test"]:
             return False
+
         # loop over all policies
-        for tmpItem in siteSpec.fairsharePolicy.split(","):
-            if re.search("(^|,|:)id=", tmpItem) is not None:
-                # new format
-                tmpMatch = re.search(f"(^|,|:)id={taskSpec.workQueue_ID}:", tmpItem)
-                if tmpMatch is not None:
-                    # check priority if any
-                    tmpPrio = None
-                    for tmpStr in tmpItem.split(":"):
-                        if tmpStr.startswith("priority"):
-                            tmpPrio = re.sub("priority", "", tmpStr)
-                            break
-                    if tmpPrio is not None:
-                        try:
-                            exec(f"tmpStat = {taskSpec.currentPriority}{tmpPrio}", globals())
-                            if not tmpStat:
-                                continue
-                        except Exception:
-                            pass
-                    # check share
-                    tmpShare = tmpItem.split(":")[-1]
-                    tmpSahre = tmpShare.replace("%", "")
-                    if tmpSahre == "0":
-                        return True
-                    else:
-                        return False
+        for policy in site_spec.fairsharePolicy.split(","):
+            # Examples of policies are:
+            # type=evgen:100%,type=simul:100%,type=any:0%
+            # type=evgen:100%,type=simul:100%,type=any:0%,group=(AP_Higgs|AP_Susy|AP_Exotics|Higgs):0%
+            # gshare=Express:100%,gshare=any:0%
+            # priority>400:0
+            tmp_processing_type = None
+            tmp_working_group = None
+            tmp_priority = None
+            tmp_gshare = None
+            tmp_fair_share = policy.split(":")[-1]
+
+            # break down each fair share policy into its fields
+            for tmp_field in policy.split(":"):
+                if tmp_field.startswith("type="):
+                    tmp_processing_type = tmp_field.split("=")[-1]
+                elif tmp_field.startswith("group="):
+                    tmp_working_group = tmp_field.split("=")[-1]
+                elif tmp_field.startswith("gshare="):
+                    tmp_gshare = tmp_field.split("=")[-1]
+                elif tmp_field.startswith("priority"):
+                    tmp_priority = re.sub("priority", "", tmp_field)
+
+            # check for a matching processing type
+            if tmp_processing_type not in ["any", None]:
+                if "*" in tmp_processing_type:
+                    tmp_processing_type = tmp_processing_type.replace("*", ".*")
+                # if there is no match between the site's fair share policy and the task's processing type,
+                # so continue looking for other policies that trigger the zero share condition
+                if re.search(f"^{tmp_processing_type}$", processing_group) is None:
+                    continue
+
+            # check for matching working group
+            if tmp_working_group not in ["any", None] and task_spec.workingGroup is not None:
+                if "*" in tmp_working_group:
+                    tmp_working_group = tmp_working_group.replace("*", ".*")
+                # if there is no match between the site's fair share policy and the task's working group
+                # continue looking for other policies that trigger the zero share condition
+                if re.search(f"^{tmp_working_group}$", task_spec.workingGroup) is None:
+                    continue
+
+            # check for matching gshare. Note that this only works for "leave gshares" in the fairsharePolicy,
+            # i.e. the ones that have no sub-gshares, since the task only gets "leave gshares" assigned
+            if tmp_gshare not in ["any", None] and task_spec.gshare is not None:
+                if "*" in tmp_gshare:
+                    tmp_gshare = tmp_gshare.replace("*", ".*")
+                # if there is no match between the site's fair share policy and the task's gshare
+                # continue looking for other policies that trigger the zero share condition
+                if re.search(f"^{tmp_gshare}$", task_spec.gshare) is None:
+                    continue
+
+            # check priority
+            if tmp_priority is not None and not ignore_priority:
+                try:
+                    exec(f"tmpStat = {task_spec.currentPriority}{tmp_priority}", globals())
+                    tmp_log.debug(
+                        f"Priority check for {site_spec.sitename}, {task_spec.currentPriority}): " f"{task_spec.currentPriority}{tmp_priority} = {tmpStat}"
+                    )
+                    if not tmpStat:
+                        continue
+                except Exception:
+                    error_type, error_value = sys.exc_info()[:2]
+                    tmp_log.error(f"Priority check for {site_spec.sitename} failed with {error_type}:{error_value}")
+
+            # check fair share value
+            # if 0, we need to skip the site
+            # if different than 0, the site can be used
+            if tmp_fair_share in ["0", "0%"]:
+                return True
             else:
-                # old format
-                tmpType = None
-                tmpGroup = None
-                tmpPrio = None
-                tmpShare = tmpItem.split(":")[-1]
-                for tmpStr in tmpItem.split(":"):
-                    if tmpStr.startswith("type="):
-                        tmpType = tmpStr.split("=")[-1]
-                    elif tmpStr.startswith("group="):
-                        tmpGroup = tmpStr.split("=")[-1]
-                    elif tmpStr.startswith("priority"):
-                        tmpPrio = re.sub("priority", "", tmpStr)
-                # check matching for type
-                if tmpType not in ["any", None]:
-                    if "*" in tmpType:
-                        tmpType = tmpType.replace("*", ".*")
-                    # type mismatch
-                    if re.search("^" + tmpType + "$", tmpProGroup) is None:
-                        continue
-                # check matching for group
-                if tmpGroup not in ["any", None] and taskSpec.workingGroup is not None:
-                    if "*" in tmpGroup:
-                        tmpGroup = tmpGroup.replace("*", ".*")
-                    # group mismatch
-                    if re.search("^" + tmpGroup + "$", taskSpec.workingGroup) is None:
-                        continue
-                # check priority
-                if tmpPrio is not None and not ignorePrio:
-                    try:
-                        exec(f"tmpStat = {taskSpec.currentPriority}{tmpPrio}", globals())
-                        if not tmpStat:
-                            continue
-                    except Exception:
-                        pass
-                # check share
-                tmpShare = tmpItem.split(":")[-1]
-                if tmpShare in ["0", "0%"]:
-                    return True
-                else:
-                    return False
+                return False
+
     except Exception:
-        errtype, errvalue = sys.exc_info()[:2]
-        tmpLog.error(f"hasZeroShare failed with {errtype}:{errvalue}")
-    # return
+        error_type, error_value = sys.exc_info()[:2]
+        tmp_log.error(f"hasZeroShare failed with {error_type}:{error_value}")
+
+    # if we reach this point, it means there is no policy preventing the site to be used
     return False
 
 
@@ -542,17 +461,7 @@ def skipProblematicSites(candidateSpecList, ngSites, sitesUsedByTask, preSetSite
 
 
 # get mapping between sites and input storage endpoints
-def getSiteInputStorageEndpointMap(site_list, site_mapper, prod_source_label, job_label, ignore_cc=False):
-    # make a map of the t1 to its respective cloud
-    t1_map = {}
-    for tmp_cloud_name in site_mapper.getCloudList():
-        # get cloud
-        tmp_cloud_spec = site_mapper.getCloud(tmp_cloud_name)
-        # get T1
-        tmp_t1_name = tmp_cloud_spec["source"]
-        # append
-        t1_map[tmp_t1_name] = tmp_cloud_name
-
+def getSiteInputStorageEndpointMap(site_list, site_mapper, prod_source_label, job_label):
     # make a map of panda sites to ddm endpoints
     ret_map = {}
     for site_name in site_list:
@@ -566,25 +475,7 @@ def getSiteInputStorageEndpointMap(site_list, site_mapper, prod_source_label, jo
         # add the schedconfig.ddm endpoints
         ret_map[site_name] = list(tmp_site_spec.ddm_endpoints_input[scope_input].all.keys())
 
-        # add the cloudconfig.tier1SE for T1s
-        if not ignore_cc and site_name in t1_map:
-            tmp_cloud_name = t1_map[site_name]
-            tmp_cloud_spec = site_mapper.getCloud(tmp_cloud_name)
-            for tmp_endpoint in tmp_cloud_spec["tier1SE"]:
-                if tmp_endpoint and tmp_endpoint not in ret_map[site_name]:
-                    ret_map[site_name].append(tmp_endpoint)
-    # return
     return ret_map
-
-
-# get lists of mandatory or inconvertible architectures
-def getOkNgArchList(task_spec):
-    if task_spec.termCondition:
-        if ".el6." in task_spec.termCondition:
-            return (None, ["x86_64-centos7-%"])
-        if ".el7." in task_spec.termCondition:
-            return (["x86_64-centos7-%"], None)
-    return (None, None)
 
 
 # get to-running rate of sites from various resources
@@ -603,7 +494,7 @@ def getSiteToRunRateStats(tbIF, vo, time_window=21600, cutoff=300, cache_lifetim
     this_pid = f"{socket.getfqdn().split('.')[0]}-{os.getpid()}_{os.getpgrp()}-broker"
     this_component = "Cache.SiteToRunRate"
     # timestamps
-    current_time = datetime.datetime.utcnow()
+    current_time = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     starttime_max = current_time - datetime.timedelta(seconds=cutoff)
     starttime_min = current_time - datetime.timedelta(seconds=time_window)
     # rounded with 10 minutes
@@ -621,7 +512,7 @@ def getSiteToRunRateStats(tbIF, vo, time_window=21600, cutoff=300, cache_lifetim
         # try some times
         for _ in range(99):
             # skip if too long after original current time
-            if datetime.datetime.utcnow() - current_time > datetime.timedelta(seconds=min(10, cache_lifetime / 4)):
+            if datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - current_time > datetime.timedelta(seconds=min(10, cache_lifetime / 4)):
                 # break trying
                 break
             try:
@@ -706,7 +597,7 @@ def getUsersJobsStats(tbIF, vo, prod_source_label, cache_lifetime=60):
     # local cache key; a must if not using global variable
     local_cache_key = "_main"
     # timestamps
-    current_time = datetime.datetime.utcnow()
+    current_time = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     # condition of query
     if local_cache_key in CACHE_UsersJobsStats and current_time <= CACHE_UsersJobsStats[local_cache_key]["exp"]:
         # query from local cache
@@ -716,7 +607,7 @@ def getUsersJobsStats(tbIF, vo, prod_source_label, cache_lifetime=60):
         # try some times
         for _ in range(99):
             # skip if too long after original current time
-            if datetime.datetime.utcnow() - current_time > datetime.timedelta(seconds=min(15, cache_lifetime / 4)):
+            if datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - current_time > datetime.timedelta(seconds=min(15, cache_lifetime / 4)):
                 # break trying
                 break
             try:
@@ -782,10 +673,10 @@ def getGShareUsage(tbIF, gshare, fresher_than_minutes_ago=15):
     ret_val = False
     ret_map = {}
     # timestamps
-    current_time = datetime.datetime.utcnow()
+    current_time = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     # try some times
     for _ in range(99):
-        now_time = datetime.datetime.utcnow()
+        now_time = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
         # skip if too long after original current time
         if now_time - current_time > datetime.timedelta(seconds=max(3, fresher_than_minutes_ago / 3)):
             # break trying
@@ -831,10 +722,10 @@ def getUserEval(tbIF, user, fresher_than_minutes_ago=20):
     ret_val = False
     ret_map = {}
     # timestamps
-    current_time = datetime.datetime.utcnow()
+    current_time = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     # try some times
     for _ in range(99):
-        now_time = datetime.datetime.utcnow()
+        now_time = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
         # skip if too long after original current time
         if now_time - current_time > datetime.timedelta(seconds=max(3, fresher_than_minutes_ago / 3)):
             # break trying
@@ -873,10 +764,10 @@ def getUserTaskEval(tbIF, taskID, fresher_than_minutes_ago=15):
     ret_val = False
     ret_map = {}
     # timestamps
-    current_time = datetime.datetime.utcnow()
+    current_time = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     # try some times
     for _ in range(99):
-        now_time = datetime.datetime.utcnow()
+        now_time = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
         # skip if too long after original current time
         if now_time - current_time > datetime.timedelta(seconds=max(3, fresher_than_minutes_ago / 3)):
             # break trying
@@ -922,10 +813,10 @@ def getAnalySitesClass(tbIF, fresher_than_minutes_ago=60):
     ret_val = False
     ret_map = {}
     # timestamps
-    current_time = datetime.datetime.utcnow()
+    current_time = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     # try some times
     for _ in range(99):
-        now_time = datetime.datetime.utcnow()
+        now_time = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
         # skip if too long after original current time
         if now_time - current_time > datetime.timedelta(seconds=max(3, fresher_than_minutes_ago / 3)):
             # break trying
@@ -982,7 +873,7 @@ class JsonSoftwareCheck:
         need_container=False,
         container_name=None,
         only_tags_fc=False,
-        host_cpu_spec=None,
+        host_cpu_specs=None,
         host_gpu_spec=None,
         log_stream=None,
     ):
@@ -1007,7 +898,7 @@ class JsonSoftwareCheck:
                                 if "excl" in architecture_map["cpu"][k]:
                                     need_cpu = True
                                     break
-                        if need_cpu and host_cpu_spec is None:
+                        if need_cpu and host_cpu_specs is None:
                             continue
                     # check if need GPU
                     if "gpu" in architecture_map:
@@ -1019,43 +910,52 @@ class JsonSoftwareCheck:
                                     break
                         if need_gpu and host_gpu_spec is None:
                             continue
-                    if host_cpu_spec or host_gpu_spec:
+                    if host_cpu_specs or host_gpu_spec:
                         # skip since the PQ doesn't describe HW spec
                         if not architecture_map:
                             continue
                         # check CPU
-                        if host_cpu_spec:
-                            # CPU not specified
-                            if "cpu" not in architecture_map:
+                        if host_cpu_specs:
+                            host_ok = False
+                            for host_cpu_spec in host_cpu_specs:
+                                # CPU not specified
+                                if "cpu" not in architecture_map:
+                                    continue
+                                # check architecture
+                                if host_cpu_spec["arch"] == "*":
+                                    if "excl" in architecture_map["cpu"]["arch"]:
+                                        continue
+                                else:
+                                    if "any" not in architecture_map["cpu"]["arch"]:
+                                        if host_cpu_spec["arch"] not in architecture_map["cpu"]["arch"]:
+                                            # check with regex
+                                            if not [True for iii in architecture_map["cpu"]["arch"] if re.search("^" + host_cpu_spec["arch"] + "$", iii)]:
+                                                continue
+                                # check vendor
+                                if host_cpu_spec["vendor"] == "*":
+                                    # task doesn't specify a vendor and PQ explicitly requests a specific vendor
+                                    if "vendor" in architecture_map["cpu"] and "excl" in architecture_map["cpu"]["vendor"]:
+                                        continue
+                                else:
+                                    # task specifies a vendor and PQ doesn't request any specific vendor
+                                    if "vendor" not in architecture_map["cpu"]:
+                                        continue
+                                    # task specifies a vendor and PQ doesn't accept any vendor or the specific vendor
+                                    if "any" not in architecture_map["cpu"]["vendor"] and host_cpu_spec["vendor"] not in architecture_map["cpu"]["vendor"]:
+                                        continue
+                                # check instruction set
+                                if host_cpu_spec["instr"] == "*":
+                                    if "instr" in architecture_map["cpu"] and "excl" in architecture_map["cpu"]["instr"]:
+                                        continue
+                                else:
+                                    if "instr" not in architecture_map["cpu"]:
+                                        continue
+                                    if "any" not in architecture_map["cpu"]["instr"] and host_cpu_spec["instr"] not in architecture_map["cpu"]["instr"]:
+                                        continue
+                                host_ok = True
+                                break
+                            if not host_ok:
                                 continue
-                            # check architecture
-                            if host_cpu_spec["arch"] == "*":
-                                if "excl" in architecture_map["cpu"]["arch"]:
-                                    continue
-                            else:
-                                if "any" not in architecture_map["cpu"]["arch"] and host_cpu_spec["arch"] not in architecture_map["cpu"]["arch"]:
-                                    continue
-                            # check vendor
-                            if host_cpu_spec["vendor"] == "*":
-                                # task doesn't specify a vendor and PQ explicitly requests a specific vendor
-                                if "vendor" in architecture_map["cpu"] and "excl" in architecture_map["cpu"]["vendor"]:
-                                    continue
-                            else:
-                                # task specifies a vendor and PQ doesn't request any specific vendor
-                                if "vendor" not in architecture_map["cpu"]:
-                                    continue
-                                # task specifies a vendor and PQ doesn't accept any vendor or the specific vendor
-                                if "any" not in architecture_map["cpu"]["vendor"] and host_cpu_spec["vendor"] not in architecture_map["cpu"]["vendor"]:
-                                    continue
-                            # check instruction set
-                            if host_cpu_spec["instr"] == "*":
-                                if "instr" in architecture_map["cpu"] and "excl" in architecture_map["cpu"]["instr"]:
-                                    continue
-                            else:
-                                if "instr" not in architecture_map["cpu"]:
-                                    continue
-                                if "any" not in architecture_map["cpu"]["instr"] and host_cpu_spec["instr"] not in architecture_map["cpu"]["instr"]:
-                                    continue
                         # check GPU
                         if host_gpu_spec:
                             # GPU not specified
@@ -1089,7 +989,7 @@ class JsonSoftwareCheck:
                 if not go_ahead:
                     continue
                 # only HW check
-                if not (cvmfs_tag or cmt_config or sw_project or sw_version or container_name) and (host_cpu_spec or host_gpu_spec):
+                if not (cvmfs_tag or cmt_config or sw_project or sw_version or container_name) and (host_cpu_specs or host_gpu_spec):
                     okSite.append(tmpSiteName)
                     continue
                 # check for fat container
@@ -1147,7 +1047,34 @@ class JsonSoftwareCheck:
                 # don't pass to subsequent check if AUTO is enabled
                 continue
             # use only AUTO for container or HW
-            if container_name is not None or host_cpu_spec is not None or host_gpu_spec is not None:
+            if container_name is not None or host_cpu_specs is not None or host_gpu_spec is not None:
                 continue
             noAutoSite.append(tmpSiteName)
         return (okSite, noAutoSite)
+
+
+# resolve cmt_config
+def resolve_cmt_config(queue_name: str, cmt_config: str, base_platform, sw_map: dict) -> str | None:
+    """
+    resolve cmt config at a given queue_name
+    :param queue_name: queue name
+    :param cmt_config: cmt confing to resolve
+    :param base_platform: base platform
+    :param sw_map: software map
+    :return: resolved cmt config or None if unavailable or valid
+    """
+    # return None if queue_name is unavailable
+    if queue_name not in sw_map:
+        return None
+    # return None if cmt_config is valid
+    if cmt_config in sw_map[queue_name]["cmtconfigs"]:
+        return None
+    # check if cmt_config matches with any of the queue's cmt_configs
+    for tmp_cmt_config in sw_map[queue_name]["cmtconfigs"]:
+        if re.search("^" + cmt_config + "$", tmp_cmt_config):
+            if base_platform:
+                # add base_platform if necessary
+                tmp_cmt_config = tmp_cmt_config + "@" + base_platform
+            return tmp_cmt_config
+    # return None if cmt_config is unavailable
+    return None

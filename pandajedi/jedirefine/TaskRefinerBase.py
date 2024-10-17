@@ -5,11 +5,12 @@ import re
 import sys
 import uuid
 
+from pandaserver.taskbuffer import EventServiceUtils, task_split_rules
+
 from pandajedi.jedicore import Interaction, JediException
 from pandajedi.jedicore.JediDatasetSpec import JediDatasetSpec
 from pandajedi.jedicore.JediFileSpec import JediFileSpec
 from pandajedi.jedicore.JediTaskSpec import JediTaskSpec
-from pandaserver.taskbuffer import EventServiceUtils
 
 from . import RefinerUtils
 
@@ -32,7 +33,7 @@ class TaskRefinerBase(object):
 
     # refresh
     def refresh(self):
-        self.siteMapper = self.taskBufferIF.getSiteMapper()
+        self.siteMapper = self.taskBufferIF.get_site_mapper()
 
     # initialize
     def initializeRefiner(self, tmpLog):
@@ -83,7 +84,7 @@ class TaskRefinerBase(object):
         taskSpec.processingType = taskParamMap["processingType"]
         taskSpec.taskType = taskParamMap["taskType"]
         taskSpec.splitRule = splitRule
-        taskSpec.startTime = datetime.datetime.utcnow()
+        taskSpec.startTime = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
         if "workingGroup" in taskParamMap:
             taskSpec.workingGroup = taskParamMap["workingGroup"]
         if "countryGroup" in taskParamMap:
@@ -240,7 +241,8 @@ class TaskRefinerBase(object):
                 # set nFilesPerJob if nEventsPerJob and nEventsPerInputFile are set
                 nFilesPerJob = taskParamMap["nEventsPerJob"] // taskParamMap["nEventsPerInputFile"]
                 self.setSplitRule(None, nFilesPerJob, JediTaskSpec.splitRuleToken["nFilesPerJob"])
-        self.setSplitRule(taskParamMap, "nFilesPerJob", JediTaskSpec.splitRuleToken["nFilesPerJob"])
+        else:
+            self.setSplitRule(taskParamMap, "nFilesPerJob", JediTaskSpec.splitRuleToken["nFilesPerJob"])
         self.setSplitRule(taskParamMap, "nEventsPerJob", JediTaskSpec.splitRuleToken["nEventsPerJob"])
         self.setSplitRule(taskParamMap, "nGBPerJob", JediTaskSpec.splitRuleToken["nGBPerJob"])
         self.setSplitRule(taskParamMap, "nMaxFilesPerJob", JediTaskSpec.splitRuleToken["nMaxFilesPerJob"])
@@ -402,6 +404,8 @@ class TaskRefinerBase(object):
             self.setSplitRule(None, 1, JediTaskSpec.splitRuleToken["allowEmptyInput"])
         if "messageDriven" in taskParamMap and taskParamMap["messageDriven"]:
             self.setSplitRule(None, 1, JediTaskSpec.splitRuleToken["messageDriven"])
+        if "allowIncompleteInDS" in taskParamMap and taskParamMap["allowIncompleteInDS"]:
+            self.setSplitRule(None, 1, JediTaskSpec.splitRuleToken["allowIncompleteInDS"])
         # work queue
         workQueue = None
         if "workQueueName" in taskParamMap:
@@ -431,19 +435,7 @@ class TaskRefinerBase(object):
         self.taskSpec.workQueue_ID = workQueue.queue_id
 
         # Initialize the global share
-        gshare = "Undefined"
-        if "gshare" in taskParamMap and self.taskBufferIF.is_valid_share(taskParamMap["gshare"]):
-            # work queue is specified
-            gshare = taskParamMap["gshare"]
-        else:
-            # get share based on definition
-            gshare = self.taskBufferIF.get_share_for_task(self.taskSpec)
-            if gshare is None:
-                gshare = "Undefined"  # Should not happen. Undefined is set when no share is found
-                # errStr  = 'share is undefined for vo={0} label={1} '.format(taskSpec.vo,taskSpec.prodSourceLabel)
-                # errStr += 'workingGroup={0} campaign={1} '.format(taskSpec.workingGroup, taskSpec.campaign)
-                # raise RuntimeError,errStr
-        self.taskSpec.gshare = gshare
+        self.taskSpec.gshare = RefinerUtils.get_initial_global_share(self.taskBufferIF, self.taskSpec.jediTaskID, taskSpec, taskParamMap)
 
         # Initialize the resource type
         try:
@@ -603,8 +595,9 @@ class TaskRefinerBase(object):
                                     tmpDatasetNameList = tmpIF.listDatasets(datasetName)
                         i_element = 0
                         for elementDatasetName in tmpDatasetNameList:
-                            if nIn > 0 or elementDatasetName not in tmpItem["expandedList"] or self.taskSpec.is_work_segmented():
-                                tmpItem["expandedList"].append(elementDatasetName)
+                            if "expandedList" in tmpItem:
+                                if elementDatasetName not in tmpItem["expandedList"]:
+                                    tmpItem["expandedList"].append(elementDatasetName)
                                 inDatasetSpec = copy.copy(datasetSpec)
                                 inDatasetSpec.datasetName = elementDatasetName
                                 if nIn > 0 or not self.taskSpec.is_hpo_workflow():
@@ -886,17 +879,21 @@ class TaskRefinerBase(object):
         return True, taskParamMap
 
     # set split rule
-    def setSplitRule(self, taskParamMap, keyName, valName):
+    def setSplitRule(self, taskParamMap, key_or_value, rule_token):
         if taskParamMap is not None:
-            if keyName not in taskParamMap:
+            if key_or_value not in taskParamMap:
+                self.taskSpec.splitRule = task_split_rules.remove_rule(self.taskSpec.splitRule, rule_token)
                 return
-            tmpStr = f"{valName}={taskParamMap[keyName]}"
+            tmpStr = f"{rule_token}={taskParamMap[key_or_value]}"
         else:
-            tmpStr = f"{valName}={keyName}"
+            if key_or_value is None:
+                self.taskSpec.splitRule = task_split_rules.remove_rule(self.taskSpec.splitRule, rule_token)
+                return
+            tmpStr = f"{rule_token}={key_or_value}"
         if self.taskSpec.splitRule in [None, ""]:
             self.taskSpec.splitRule = tmpStr
         else:
-            tmpMatch = re.search(valName + "=(-*\d+)(,-*\d+)*", self.taskSpec.splitRule)
+            tmpMatch = re.search(rule_token + "=(-*\d+)(,-*\d+)*", self.taskSpec.splitRule)
             if tmpMatch is None:
                 # append
                 self.taskSpec.splitRule += f",{tmpStr}"

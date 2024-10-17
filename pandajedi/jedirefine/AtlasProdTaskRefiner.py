@@ -4,8 +4,9 @@ import re
 import shlex
 import traceback
 
-from pandajedi.jedicore import JediException
 from pandaserver.dataservice import DataServiceUtils
+
+from pandajedi.jedicore import JediException
 
 from .TaskRefinerBase import TaskRefinerBase
 
@@ -43,7 +44,7 @@ class AtlasProdTaskRefiner(TaskRefinerBase):
                 tmpStr += f"num_pending_tasks_AES={nPendingTasks} max_pending_tasks_AES={maxPending} "
                 tmpLog.info(tmpStr)
                 # not chane many tasks at once
-                if lastTaskTime is None or (lastTaskTime < datetime.datetime.utcnow() - datetime.timedelta(minutes=5)):
+                if lastTaskTime is None or (lastTaskTime < datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(minutes=5)):
                     if minNumEvents is not None and nEvents < minNumEvents and maxPending is not None and (maxPending is None or maxPending > nPendingTasks):
                         autoEsConversion = True
                         tmpLog.info("will be converted to AES unless it goes to pending")
@@ -107,7 +108,7 @@ class AtlasProdTaskRefiner(TaskRefinerBase):
                 datasetType = DataServiceUtils.getDatasetType(datasetSpec.datasetName)
                 if datasetType not in ["", None]:
                     datasetTypeListIn.append(datasetType)
-            # extract datatype and set destination if nessesary
+            # extract datatype and set destination if necessary
             datasetTypeList = []
             for datasetSpec in self.outDatasetSpecList:
                 datasetType = DataServiceUtils.getDatasetType(datasetSpec.datasetName)
@@ -148,17 +149,3 @@ class AtlasProdTaskRefiner(TaskRefinerBase):
             raise e
         tmpLog.debug("done")
         return self.SC_SUCCEEDED
-
-    # insert string
-    def insertString(self, paramName, tmpStr, origStr):
-        items = shlex.split(origStr, posix=False)
-        newStr = ""
-        for item in items:
-            if paramName not in item:
-                newStr += item
-            else:
-                newStr += item[:-1]
-                newStr += tmpStr
-                newStr += item[-1]
-            newStr += " "
-        return newStr

@@ -7,8 +7,9 @@ import traceback
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-from pandajedi.jedirefine import RefinerUtils
 from pandaserver.taskbuffer import EventServiceUtils
+
+from pandajedi.jedirefine import RefinerUtils
 
 from .MailTemplates import html_head, jedi_task_html_body, jedi_task_plain
 from .PostProcessorBase import PostProcessorBase
@@ -44,7 +45,7 @@ class AtlasAnalPostProcessor(PostProcessorBase):
             # loop over all datasets
             use_lib = False
             n_ok_lib = 0
-            lock_update_time = datetime.datetime.utcnow()
+            lock_update_time = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
             for datasetSpec in taskSpec.datasetSpecList:
                 # ignore template
                 if datasetSpec.type.startswith("tmpl_"):
@@ -98,7 +99,7 @@ class AtlasAnalPostProcessor(PostProcessorBase):
                         tmp_logger.debug(f"skip freezing transient datasetID={datasetSpec.datasetID}:Name={datasetSpec.datasetName}")
                 # update dataset
                 datasetSpec.state = "closed"
-                datasetSpec.stateCheckTime = datetime.datetime.utcnow()
+                datasetSpec.stateCheckTime = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
                 # check if build step was succeeded
                 if datasetSpec.type == "lib":
@@ -123,8 +124,8 @@ class AtlasAnalPostProcessor(PostProcessorBase):
                     datasetSpec.jediTaskID, datasetSpec.datasetID, {"state": datasetSpec.state, "stateCheckTime": datasetSpec.stateCheckTime}
                 )
                 # update task lock
-                if datetime.datetime.utcnow() - lock_update_time > datetime.timedelta(minutes=5):
-                    lock_update_time = datetime.datetime.utcnow()
+                if datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - lock_update_time > datetime.timedelta(minutes=5):
+                    lock_update_time = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
                     # update lock
                     self.taskBufferIF.updateTaskLock_JEDI(taskSpec.jediTaskID)
             # dialog
@@ -225,6 +226,8 @@ class AtlasAnalPostProcessor(PostProcessorBase):
                         output_datasets.append(datasetSpec.containerName)
                 # process summary
                 if datasetSpec.isMasterInput():
+                    if datasetSpec.status == "removed":
+                        continue
                     try:
                         n_total_jobs += datasetSpec.nFiles
                         n_succeeded_jobs += datasetSpec.nFilesFinished
@@ -337,7 +340,7 @@ class AtlasAnalPostProcessor(PostProcessorBase):
             tmp_logger.debug("DN is empty")
         else:
             # avoid too frequent lookup
-            if db_uptime is not None and datetime.datetime.utcnow() - db_uptime < datetime.timedelta(hours=1):
+            if db_uptime is not None and datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - db_uptime < datetime.timedelta(hours=1):
                 tmp_logger.debug("no lookup")
                 if not_send_mail or mail_address_db in [None, ""]:
                     return ret_suppressed

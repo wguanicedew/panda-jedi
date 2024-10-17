@@ -24,11 +24,22 @@ RUN yum install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x
 RUN yum install --nogpgcheck -y postgresql16
 RUN  yum clean all && rm -rf /var/cache/yum
 
+
+# install Oracle Instant Client and tnsnames.ora
+RUN wget https://download.oracle.com/otn_software/linux/instantclient/oracle-instantclient-basic-linuxx64.rpm -P /tmp/ && \
+    yum install /tmp/oracle-instantclient-basic-linuxx64.rpm -y && \
+    wget https://download.oracle.com/otn_software/linux/instantclient/oracle-instantclient-sqlplus-linuxx64.rpm -P /tmp/ && \
+    yum install /tmp/oracle-instantclient-sqlplus-linuxx64.rpm -y
+
+# Grab the latest version of the Oracle tnsnames.ora file
+RUN ln -fs /data/panda/tnsnames.ora /etc/tnsnames.ora
+
 # setup venv with pythonX.Y
 RUN python$(echo ${PYTHON_VERSION} | sed -E 's/\.[0-9]+$//') -m venv /opt/panda
-RUN /opt/panda/bin/pip install -U pip
-RUN /opt/panda/bin/pip install -U setuptools
-RUN /opt/panda/bin/pip install -U gnureadline
+RUN /opt/panda/bin/pip install --no-cache-dir -U pip
+RUN /opt/panda/bin/pip install --no-cache-dir -U setuptools
+RUN /opt/panda/bin/pip install --no-cache-dir -U gnureadline
+RUN /opt/panda/bin/pip install --no-cache-dir -U oracledb
 RUN adduser atlpan
 RUN groupadd zp
 RUN usermod -a -G zp atlpan
@@ -37,8 +48,8 @@ RUN /opt/panda/bin/pip install "git+https://github.com/wguanicedew/panda-server.
 RUN mkdir /tmp/src
 WORKDIR /tmp/src
 COPY . .
-RUN /opt/panda/bin/python setup.py sdist; /opt/panda/bin/pip install `ls dist/p*.tar.gz`[postgres]
-RUN /opt/panda/bin/pip install rucio-clients
+RUN /opt/panda/bin/pip install --no-cache-dir .[postgres]
+RUN /opt/panda/bin/pip install --no-cache-dir rucio-clients
 
 RUN mkdir -p /etc/panda
 RUN mkdir -p /etc/idds
